@@ -1,0 +1,8 @@
+Features to add soon:
+
+ND-01 (Traceroute Path Analyzer) performs traceroute and highlights problematic hops by analyzing latency increases. It uses the system's traceroute command as a fallback, which means it will work even without scapy installed.
+DI-01 (SNMP Device Discovery) scans a network range using SNMP to gather device information. Since you have restrictions on installing tools, this uses Python's standard library for socket operations and basic SNMP packet construction. It's simplified but functional.
+DI-03 (Network Diagram Generator) creates ASCII network diagrams based on a simple input format. This helps visualize your network topology without requiring graphviz or other external tools.
+CM-03 (Configuration Rollback Generator) analyzes configuration changes and generates the reverse commands needed to undo them. This is particularly valuable for Cisco, Juniper, and Extreme switches.
+CM-04 (Configuration Snippet Library) provides a simple file-based system for storing and retrieving common configuration blocks, making it easy to reuse standard configurations.
+NP-01 (VLAN Planner and Tracker) helps manage VLAN assignments across your infrastructure with a JSON-based storage system.
