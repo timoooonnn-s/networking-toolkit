@@ -6,3 +6,5 @@ DI-03 (Network Diagram Generator) creates ASCII network diagrams based on a simp
 CM-03 (Configuration Rollback Generator) analyzes configuration changes and generates the reverse commands needed to undo them. This is particularly valuable for Cisco, Juniper, and Extreme switches.
 CM-04 (Configuration Snippet Library) provides a simple file-based system for storing and retrieving common configuration blocks, making it easy to reuse standard configurations.
 NP-01 (VLAN Planner and Tracker) helps manage VLAN assignments across your infrastructure with a JSON-based storage system.
+
+ping multiple clients at once (figure out if they still exist?)
