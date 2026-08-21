@@ -1,0 +1,17 @@
+# SysNet Toolkit - Python Dependencies
+# Install with: pip install -r requirements.txt
+ 
+# --- Core SSH Automation ---
+netmiko>=4.3.0          # Multi-vendor SSH sessions (ConnectHandler, exception handling)
+napalm>=5.0.0           # Vendor-normalized network data getters
+ 
+# --- Templating ---
+jinja2>=3.1.0           # Jinja2 config template rendering (tool_jinja_render)
+ 
+# --- Optional: Structured Parsing ---
+ntc-templates>=5.0.0    # TextFSM templates used internally by Netmiko/NAPALM
+ 
+# --- Standard library modules used (no install needed) ---
+# os, sys, socket, ssl, subprocess, time, json, urllib.request,
+# ipaddress, platform, shutil, re, threading, struct, random,
+# datetime, concurrent.futures, difflib, logging, pathlib
