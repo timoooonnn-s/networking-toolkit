@@ -24,10 +24,7 @@ import os
 
 from core.colors import C_BOLD, C_CYAN, C_GREEN, C_RED, C_RESET, C_YELLOW
 from core.dependency_check import check_dependency
-
-# Persistent storage file paths (relative to project root)
-SNIPPET_FILE = "sysnet_snippets.json"
-
+from core.paths import SNIPPET_FILE
 
 # ---------------------------------------------------------------------------
 # Config File Diff
@@ -174,15 +171,37 @@ def tool_diagram_gen() -> None:
         dests.add(dst)
 
     all_nodes = set(adj.keys()) | dests
-    roots     = [n for n in all_nodes if n not in dests] or [list(all_nodes)[0]]
+    # A topology where every node is also a destination is a pure cycle and
+    # has no root; start from the first connection's source so the output is
+    # deterministic rather than dependent on set ordering.
+    roots     = sorted(n for n in all_nodes if n not in dests) or [connections[0][0]]
 
-    def _print_tree(node: str, prefix: str = "", is_last: bool = True) -> None:
+    def _print_tree(
+        node: str,
+        prefix: str = "",
+        is_last: bool = True,
+        seen: frozenset[str] = frozenset(),
+    ) -> None:
+        """
+        Render one subtree.
+
+        *seen* carries the nodes on the path from the root to here, so a
+        cyclic topology ('A -> B' plus 'B -> A', which is how anyone would
+        describe a redundant link) prints the loop once and stops.  Without
+        it the recursion ran until RecursionError, after dumping megabytes to
+        the terminal and taking the whole session down with it.
+        """
         connector = "└── " if is_last else "├── "
+        if node in seen:
+            print(f"{prefix}{connector}[ {C_YELLOW}{node}{C_RESET} ]  "
+                  f"{C_YELLOW}← loop, already shown{C_RESET}")
+            return
+
         print(f"{prefix}{connector}[ {C_CYAN}{node}{C_RESET} ]")
         children = adj.get(node, [])
         for i, child in enumerate(children):
             new_prefix = prefix + ("    " if is_last else "│   ")
-            _print_tree(child, new_prefix, i == len(children) - 1)
+            _print_tree(child, new_prefix, i == len(children) - 1, seen | {node})
 
     print(f"\n{C_BOLD}--- Topology ---{C_RESET}")
     for root in roots:

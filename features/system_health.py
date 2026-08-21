@@ -23,10 +23,27 @@ import subprocess
 
 from core.colors import C_BOLD, C_CYAN, C_GREEN, C_RED, C_RESET, C_YELLOW
 
-
 # ---------------------------------------------------------------------------
 # System Resource Snapshot
 # ---------------------------------------------------------------------------
+
+def _read_meminfo(path: str = "/proc/meminfo") -> dict[str, int]:
+    """
+    Parse /proc/meminfo into {field: kB}, keyed by name rather than by line
+    number — the field order and the set of fields both vary by kernel.
+    """
+    values: dict[str, int] = {}
+    try:
+        with open(path) as handle:
+            for line in handle:
+                key, _, rest = line.partition(":")
+                parts = rest.split()
+                if parts and parts[0].isdigit():
+                    values[key.strip()] = int(parts[0])
+    except OSError:
+        return {}
+    return values
+
 
 def tool_sys_resource() -> None:
     """Display CPU load average, disk usage, and memory stats."""
@@ -50,17 +67,33 @@ def tool_sys_resource() -> None:
 
     # Memory (Linux /proc/meminfo)
     if platform.system() == "Linux" and os.path.exists("/proc/meminfo"):
-        with open("/proc/meminfo") as f:
-            lines = f.readlines()
-        mem_total = int(lines[0].split()[1]) // 1024   # kB → MB
-        mem_avail = int(lines[2].split()[1]) // 1024
-        mem_used  = mem_total - mem_avail
-        pct_mem   = (mem_used / mem_total) * 100
-        color     = C_RED if pct_mem > 90 else C_YELLOW if pct_mem > 75 else C_GREEN
-        print(
-            f"Memory:             {color}{mem_used} MB used "
-            f"/ {mem_total} MB total  ({pct_mem:.1f}%){C_RESET}"
-        )
+        meminfo = _read_meminfo()
+        mem_total = meminfo.get("MemTotal", 0) // 1024        # kB → MB
+        # MemAvailable when the kernel provides it (2.6.27+), otherwise the
+        # classic free+buffers+cached approximation.  The old code read
+        # lines[2] by index and assumed it was MemAvailable — on a kernel
+        # that omits the field it silently reported Buffers instead, and
+        # claimed ~99% memory used.
+        if "MemAvailable" in meminfo:
+            mem_avail = meminfo["MemAvailable"] // 1024
+        else:
+            mem_avail = (
+                meminfo.get("MemFree", 0)
+                + meminfo.get("Buffers", 0)
+                + meminfo.get("Cached", 0)
+            ) // 1024
+
+        if mem_total > 0:
+            mem_used = mem_total - mem_avail
+            pct_mem  = (mem_used / mem_total) * 100
+            color    = C_RED if pct_mem > 90 else C_YELLOW if pct_mem > 75 else C_GREEN
+            print(
+                f"Memory:             {color}{mem_used} MB used "
+                f"/ {mem_total} MB total  ({pct_mem:.1f}%){C_RESET}"
+            )
+        else:
+            print(f"Memory:             {C_YELLOW}/proc/meminfo did not report "
+                  f"MemTotal{C_RESET}")
     else:
         print(f"Memory:             {C_YELLOW}Full details require psutil on non-Linux OS{C_RESET}")
 
@@ -136,7 +169,7 @@ def tool_log_scanner() -> None:
     kw_lower = keyword.lower()
 
     try:
-        with open(filepath, "r", errors="ignore") as f:
+        with open(filepath, errors="ignore") as f:
             for line_no, line in enumerate(f, start=1):
                 if kw_lower in line.lower():
                     print(f"{C_CYAN}Line {line_no}:{C_RESET} {line.strip()[:120]}")

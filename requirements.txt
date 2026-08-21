@@ -1,17 +1,36 @@
-# SysNet Toolkit - Python Dependencies
+# SysNet Toolkit — Python dependencies
 # Install with: pip install -r requirements.txt
- 
-# --- Core SSH Automation ---
-netmiko>=4.3.0          # Multi-vendor SSH sessions (ConnectHandler, exception handling)
-napalm>=5.0.0           # Vendor-normalized network data getters
- 
-# --- Templating ---
-jinja2>=3.1.0           # Jinja2 config template rendering (tool_jinja_render)
- 
-# --- Optional: Structured Parsing ---
-ntc-templates>=5.0.0    # TextFSM templates used internally by Netmiko/NAPALM
- 
-# --- Standard library modules used (no install needed) ---
-# os, sys, socket, ssl, subprocess, time, json, urllib.request,
-# ipaddress, platform, shutil, re, threading, struct, random,
-# datetime, concurrent.futures, difflib, logging, pathlib
+#
+# Everything here is OPTIONAL.  The toolkit starts and every stdlib-only tool
+# works without any of it; each device-facing tool checks for what it needs
+# and prints the pip command instead of a stack trace (menu option 'd' shows
+# the full status).
+
+# --- SSH automation (bulk runner, backup, validator, rollback push) ---
+netmiko>=4.3.0
+
+# paramiko is pulled in by netmiko, but the ceiling is deliberate: paramiko
+# 4.x DROPPED the ssh-dss host key algorithm, which the oldest ERS/BOSS
+# stackables still present.  Bumping past it silently strands that gear with
+# an "Incompatible ssh peer (no acceptable host key)" that looks like a
+# network problem.
+paramiko>=3.4,<4
+
+# --- Vendor-normalized getters (NAPALM tools; Cisco IOS/IOS-XE + Junos) ---
+napalm>=5.0.0
+
+# --- Templating (Jinja2 config renderer) ---
+jinja2>=3.1.0
+
+# --- Structured CLI parsing used internally by Netmiko/NAPALM ---
+ntc-templates>=5.0.0
+
+# --- Development only ---
+# pytest>=8.0        # the offline test suite: python3 -m pytest
+# ruff>=0.5          # linting: ruff check .
+
+# --- External binaries (not pip-installable) ---
+# fping   Optional. The multi-host reachability check uses it when present —
+#         one process for the whole subnet instead of one ping per host.
+#         Without it the tool falls back to the system ping automatically.
+#           Debian/Ubuntu: apt install fping      macOS: brew install fping
