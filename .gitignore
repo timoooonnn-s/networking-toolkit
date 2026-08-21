@@ -205,3 +205,8 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# SysNet Toolkit runtime state (created on first use)
+logs/
+sysnet_snippets.json
+sysnet_vlans.json
