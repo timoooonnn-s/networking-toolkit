@@ -34,17 +34,13 @@ Usage
 from __future__ import annotations
 
 import logging
-import os
+import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
-# ---------------------------------------------------------------------------
-# Directory setup — /logs/ relative to the project root
-# ---------------------------------------------------------------------------
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent
-LOG_DIR = _PROJECT_ROOT / "logs"
-LOG_DIR.mkdir(parents=True, exist_ok=True)
+from core.paths import LOG_DIR, ensure_dir
+
+ensure_dir(LOG_DIR)
 
 
 class AuditLogger:
@@ -60,24 +56,35 @@ class AuditLogger:
         Override the default /logs/ directory (useful for testing).
     """
 
-    def __init__(self, device_ip: str, log_dir: Optional[Path] = None) -> None:
+    def __init__(self, device_ip: str, log_dir: Path | None = None) -> None:
         self.device_ip = device_ip
         self._log_dir  = Path(log_dir) if log_dir else LOG_DIR
 
-        # Build a unique filename:  <ip>_<YYYYMMDD_HHMMSS>.log
-        timestamp_str  = datetime.now().strftime("%Y%m%d_%H%M%S")
-        safe_ip        = device_ip.replace(".", "_").replace(":", "_")
-        self._filename = self._log_dir / f"{safe_ip}_{timestamp_str}.log"
+        ensure_dir(self._log_dir)
 
-        # Use Python's logging module for thread-safe file writes
-        self._logger = logging.getLogger(f"audit.{device_ip}.{timestamp_str}")
+        # Build a unique filename:  <ip>_<YYYYMMDD_HHMMSS>_<token>.log
+        #
+        # The short random token is load-bearing.  Two sessions opened against
+        # the same device inside one second used to collide on both the
+        # filename and the logger name, so they shared a single Logger object,
+        # stacked two handlers on it, and wrote every audit line twice.
+        timestamp_str  = datetime.now().strftime("%Y%m%d_%H%M%S")
+        token          = uuid.uuid4().hex[:8]
+        safe_ip        = device_ip.replace(".", "_").replace(":", "_")
+        self._filename = self._log_dir / f"{safe_ip}_{timestamp_str}_{token}.log"
+
+        # Use Python's logging module for thread-safe file writes.  The logger
+        # name carries the same token, so no two instances can ever share one.
+        self._logger = logging.getLogger(f"audit.{safe_ip}.{timestamp_str}.{token}")
         self._logger.setLevel(logging.DEBUG)
+        self._logger.propagate = False   # audit lines never reach the root logger
 
         # File handler — each AuditLogger instance writes to its own file
         handler = logging.FileHandler(self._filename, encoding="utf-8")
         handler.setFormatter(logging.Formatter("%(message)s"))   # raw format
         self._logger.addHandler(handler)
         self._handler = handler
+        self._closed   = False
 
         # Write a session-open marker
         self._write_marker(f"SESSION OPENED  device={device_ip}")
@@ -100,6 +107,8 @@ class AuditLogger:
         output : str
             The raw text response received from the device.
         """
+        if self._closed:
+            return
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         prefix = f"[{ts}] [{self.device_ip}] [{command}]"
 
@@ -112,13 +121,24 @@ class AuditLogger:
 
     def log_error(self, command: str, error: str) -> None:
         """Record a command that failed with an exception message."""
+        if self._closed:
+            return
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self._logger.error(
             f"[{ts}] [{self.device_ip}] [{command}] -> ERROR: {error}"
         )
 
     def close(self) -> None:
-        """Flush and close the underlying file handler."""
+        """
+        Flush and close the underlying file handler.
+
+        Idempotent: a session that is closed explicitly and then again by the
+        context manager (or by a `finally` on an error path) must not write
+        through an already-closed handler.
+        """
+        if self._closed:
+            return
+        self._closed = True
         self._write_marker("SESSION CLOSED")
         self._handler.flush()
         self._handler.close()
@@ -133,7 +153,7 @@ class AuditLogger:
     # Context-manager support
     # ------------------------------------------------------------------
 
-    def __enter__(self) -> "AuditLogger":
+    def __enter__(self) -> AuditLogger:
         return self
 
     def __exit__(self, *_) -> None:

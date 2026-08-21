@@ -17,7 +17,7 @@ The user (or calling code) selects the target OS.  The module then:
 Data flow
 ---------
     rollback.py  ──►  RollbackEngine.generate()  ──►  list[str] of rollback cmds
-    rollback.py  ──►  RollbackEngine.push()       ──►  ssh_runner._run_session()
+    rollback.py  ──►  RollbackEngine.push()       ──►  core.connection.SshRunner
                                                   ──►  AuditLogger
 
 Usage (programmatic)
@@ -39,15 +39,20 @@ Usage (interactive)
 
 from __future__ import annotations
 
-import getpass
 from typing import Any
 
 from core.audit_logger import AuditLogger
 from core.colors import (
-    C_BOLD, C_CYAN, C_GREEN, C_RED, C_RESET, C_YELLOW,
+    C_BOLD,
+    C_CYAN,
+    C_GREEN,
+    C_RED,
+    C_RESET,
+    C_YELLOW,
 )
+from core.connection import CommandError, ConnectionFailed, SshRunner
 from core.dependency_check import check_dependency
-from core.inventory import SUPPORTED_OS, build_ad_hoc_profile
+from core.prompts import pick_target
 
 # ---------------------------------------------------------------------------
 # Vendor OS identifiers used as keys throughout this module
@@ -55,8 +60,14 @@ from core.inventory import SUPPORTED_OS, build_ad_hoc_profile
 OS_CISCO  = ("cisco_ios", "cisco_xe")
 OS_JUNOS  = ("juniper_junos",)
 OS_EXOS   = ("extreme_exos",)
+OS_VSP    = ("extreme_vsp",)
+OS_ERS    = ("extreme_ers",)
 
-ALL_OS_TYPES = OS_CISCO + OS_JUNOS + OS_EXOS
+# ERS and VSP are separate OS types, not strategies under EXOS.  They used to
+# be reachable only as "strategies" of extreme_exos while being absent from
+# SUPPORTED_OS entirely, so a generated ERS/VSP script could be printed but
+# never pushed — build_ad_hoc_profile() rejected the device type.
+ALL_OS_TYPES = OS_CISCO + OS_JUNOS + OS_EXOS + OS_VSP + OS_ERS
 
 
 # ---------------------------------------------------------------------------
@@ -103,9 +114,18 @@ class _CiscoRollback:
                 rollback.append(" ".join(parts[1:]))
 
             elif parts[0].startswith("int"):
-                # Interface context — use 'default' to reset to factory
+                # Interface context — 'default interface' resets the port to
+                # factory settings, which is destructive.  The warning goes on
+                # its OWN line: a trailing '! Verify before applying' does not
+                # start with '!', so push()'s comment filter used to send the
+                # whole string to the device, IOS rejected it, and the UI
+                # still reported "Rollback pushed successfully".
                 iface = parts[1] if len(parts) > 1 else ""
-                rollback.append(f"default interface {iface}  ! Verify before applying")
+                rollback.append(
+                    "! WARNING: 'default interface' resets the port to factory "
+                    "settings — verify before applying."
+                )
+                rollback.append(f"default interface {iface}")
 
             else:
                 rollback.append(f"no {cmd}")
@@ -135,7 +155,7 @@ class _CiscoRollback:
         """Generate commands to save a pre-change archive snapshot."""
         return [
             "! --- Save pre-change archive ---",
-            f"archive config",
+            "archive config",
             f"! Alternatively: copy running-config flash:{archive_label}",
         ]
 
@@ -162,6 +182,10 @@ class _JuniperRollback:
         """
         return [
             "# --- Juniper Junos Rollback Script ---",
+            # 'configure' first: rollback / show | compare / commit are
+            # configuration-mode commands and fail outright from the
+            # operational mode a session lands in.
+            "configure",
             f"rollback {rollback_id}",
             "show | compare",  # Review diff before committing
             "commit and-quit",
@@ -181,6 +205,7 @@ class _JuniperRollback:
             "# --- Juniper Junos Command Inversion Rollback ---",
             "# WARNING: 'delete' removes the config stanza entirely.",
             "# For value restoration, use 'rollback N' instead.",
+            "configure",
         ]
 
         for cmd in set_commands:
@@ -205,8 +230,9 @@ class _JuniperRollback:
         """Generate a safe commit-confirmed with automatic revert."""
         return [
             "# --- Junos Commit Confirmed (Safety Net) ---",
+            "configure",
             f"commit confirmed {minutes}",
-            "# You have {minutes} minutes to verify and run 'commit' to keep changes.",
+            f"# You have {minutes} minutes to verify and run 'commit' to keep changes.",
             "# If you do nothing, Junos will automatically rollback.",
         ]
 
@@ -232,7 +258,7 @@ class _ExtremeRollback:
         """
         return [
             "# --- Extreme EXOS Rollback Script ---",
-            f"# Pre-change: save running config as fallback",
+            "# Pre-change: save running config as fallback",
             f"save configuration {save_filename}",
             "#",
             "# To rollback after a bad change:",
@@ -246,7 +272,7 @@ class _ExtremeRollback:
         """Generate ERS (Extreme Routing Switch) backup + restore commands."""
         return [
             "# --- Extreme ERS Rollback Script ---",
-            f"# Pre-change backup:",
+            "# Pre-change backup:",
             f"copy config {save_filename}",
             "#",
             "# To restore:",
@@ -260,7 +286,7 @@ class _ExtremeRollback:
             "# --- Extreme VSP Rollback Script ---",
             "# Pre-change backup (from CLI):",
             "backup config",
-            f"# Or explicitly:",
+            "# Or explicitly:",
             f"copy running-config {save_filename}",
             "#",
             "# To restore:",
@@ -289,9 +315,7 @@ class _ExtremeRollback:
                 rollback.append(f"enable {' '.join(parts[1:])}")
             elif parts[0] == "configure":
                 rollback.append(f"unconfigure {' '.join(parts[1:])}")
-            elif parts[0] == "create":
-                rollback.append(f"delete {' '.join(parts[1:])}")
-            elif parts[0] == "add":
+            elif parts[0] == "create" or parts[0] == "add":
                 rollback.append(f"delete {' '.join(parts[1:])}")
             else:
                 rollback.append(f"# Manual review required: {cmd}")
@@ -328,7 +352,6 @@ class RollbackEngine:
         strategy:          str = "inversion",
         archive_label:     str = "rollback_1",
         junos_rollback_id: int = 1,
-        extreme_platform:  str = "exos",
         save_filename:     str = "rollback.cfg",
         commit_confirmed:  int = 5,
     ) -> list[str]:
@@ -340,15 +363,17 @@ class RollbackEngine:
         commands : list[str] | None
             Applied commands to invert (required for 'inversion' strategy).
         strategy : str
-            For Cisco: 'inversion' or 'archive'.
-            For Juniper: 'inversion', 'rollback', or 'commit_confirmed'.
-            For Extreme: 'inversion', 'exos', 'ers', or 'vsp'.
+            Cisco:        'inversion' | 'archive'
+            Juniper:      'inversion' | 'rollback' | 'commit_confirmed'
+            Extreme EXOS: 'inversion' | 'exos'
+            Extreme VSP:  'vsp'
+            Extreme ERS:  'ers'
+            An unrecognised value raises ValueError rather than quietly
+            producing a different script than the one asked for.
         archive_label : str
             Cisco archive filename (archive strategy only).
         junos_rollback_id : int
             Junos rollback version index (rollback strategy only).
-        extreme_platform : str
-            Extreme sub-platform: 'exos', 'ers', or 'vsp'.
         save_filename : str
             Extreme config filename for save/load operations.
         commit_confirmed : int
@@ -361,33 +386,42 @@ class RollbackEngine:
             or direct push.
         """
         cmds = commands or []
+        valid = VALID_STRATEGIES.get(_resolve_vendor_group(self.os_type), ())
+        if strategy not in valid:
+            # Silently falling back to 'inversion' turned a typo into a
+            # *different rollback script* than the operator asked for.
+            raise ValueError(
+                f"Unknown strategy '{strategy}' for {self.os_type}. "
+                f"Choose from: {', '.join(valid)}"
+            )
 
         # --- Cisco ---
         if self.os_type in OS_CISCO:
             if strategy == "archive":
                 return _CiscoRollback.generate_archive_rollback(archive_label)
-            else:  # default: inversion
-                return _CiscoRollback.generate_inversion(cmds)
+            return _CiscoRollback.generate_inversion(cmds)
 
         # --- Juniper ---
-        elif self.os_type in OS_JUNOS:
+        if self.os_type in OS_JUNOS:
             if strategy == "commit_confirmed":
                 return _JuniperRollback.generate_commit_confirmed(commit_confirmed)
-            elif strategy == "rollback":
+            if strategy == "rollback":
                 return _JuniperRollback.generate_rollback(junos_rollback_id)
-            else:  # default: inversion
-                return _JuniperRollback.generate_inversion(cmds)
+            return _JuniperRollback.generate_inversion(cmds)
 
-        # --- Extreme ---
-        elif self.os_type in OS_EXOS:
-            if strategy == "ers":
-                return _ExtremeRollback.generate_ers(save_filename)
-            elif strategy == "vsp":
-                return _ExtremeRollback.generate_vsp(save_filename)
-            elif strategy == "inversion":
+        # --- Extreme EXOS ---
+        if self.os_type in OS_EXOS:
+            if strategy == "inversion":
                 return _ExtremeRollback.generate_inversion(cmds)
-            else:  # default: exos
-                return _ExtremeRollback.generate_exos(save_filename)
+            return _ExtremeRollback.generate_exos(save_filename)
+
+        # --- Extreme VSP / VOSS ---
+        if self.os_type in OS_VSP:
+            return _ExtremeRollback.generate_vsp(save_filename)
+
+        # --- Extreme ERS / BOSS ---
+        if self.os_type in OS_ERS:
+            return _ExtremeRollback.generate_ers(save_filename)
 
         return [f"# No rollback template for os_type='{self.os_type}'"]
 
@@ -395,61 +429,89 @@ class RollbackEngine:
         self,
         device_profile: dict[str, Any],
         rollback_cmds:  list[str],
-    ) -> None:
+    ) -> bool:
         """
-        Push *rollback_cmds* to the device via a persistent Netmiko session.
+        Push *rollback_cmds* to the device and report what actually happened.
 
-        Only non-comment lines are sent to the device.  Comment lines
-        (starting with '#' or '!') are logged but not transmitted.
+        Only non-comment lines are sent; comment lines ('#' / '!') are shown
+        but never transmitted.  Each command's output is checked with
+        looks_like_error(), because ``send_command_timing`` returns a device
+        rejection as ordinary text — the previous version never inspected it
+        and printed "Rollback pushed successfully" for a script the device
+        had refused line by line.
 
-        Parameters
-        ----------
-        device_profile : dict
-            Netmiko-compatible connection dict.
-        rollback_cmds : list[str]
-            Output of self.generate().
+        Returns True only when every command was accepted.
         """
         if not check_dependency("netmiko"):
-            return
-
-        from netmiko import ConnectHandler
-        from netmiko.exceptions import (
-            NetmikoAuthenticationException,
-            NetmikoTimeoutException,
-        )
+            return False
 
         host = device_profile.get("host", "unknown")
         executable = [
             cmd for cmd in rollback_cmds
             if cmd.strip() and not cmd.strip().startswith(("#", "!"))
         ]
+        if not executable:
+            print(f"{C_YELLOW}Nothing to push — the script is all comments.{C_RESET}")
+            return False
 
-        print(f"\n{C_CYAN}Pushing {len(executable)} rollback commands to {host} ...{C_RESET}")
+        print(f"\n{C_CYAN}Pushing {len(executable)} rollback command(s) "
+              f"to {host} ...{C_RESET}")
 
-        with AuditLogger(host) as audit:
-            try:
-                conn = ConnectHandler(**device_profile)
-                conn.enable()
+        audit  = AuditLogger(host)
+        runner = None
+        failed: list[str] = []
+        try:
+            # SshRunner handles the platform's login gate, privilege step and
+            # paging quirk, and never sends 'enable' to a Junos box.
+            runner = SshRunner(device_profile, audit=audit)
+            for warning in runner.setup_warnings:
+                print(f"{C_YELLOW}  ! {warning}{C_RESET}")
 
-                for cmd in executable:
-                    output = conn.send_command_timing(cmd)
-                    audit.log(command=cmd, output=output)
-                    print(f"  {C_GREEN}✔{C_RESET}  {cmd}")
-                    if output.strip():
-                        print(f"      {C_CYAN}{output[:80]}{C_RESET}")
+            for cmd in executable:
+                try:
+                    # run_timing, not run: a rollback script switches modes
+                    # ('configure terminal', 'end', Junos's 'configure'), and
+                    # after the first one the prompt no longer matches the
+                    # base prompt send_command() waits for.
+                    output = runner.run_timing(cmd)
+                except CommandError as exc:
+                    failed.append(cmd)
+                    print(f"  {C_RED}✘{C_RESET}  {cmd}")
+                    detail = (exc.output or str(exc)).strip().splitlines()
+                    if detail:
+                        print(f"      {C_RED}{detail[-1][:100]}{C_RESET}")
+                    continue
+                print(f"  {C_GREEN}✔{C_RESET}  {cmd}")
+                if output.strip():
+                    print(f"      {C_CYAN}{output.strip().splitlines()[0][:80]}{C_RESET}")
 
-                conn.disconnect()
-                print(f"\n{C_GREEN}Rollback pushed successfully.{C_RESET}")
-                print(f"{C_CYAN}Audit log: {audit.log_path}{C_RESET}")
+        except ConnectionFailed as exc:
+            print(f"{C_RED}Connection error: {exc}{C_RESET}")
+            audit.log_error("ROLLBACK_SESSION", str(exc))
+            audit.close()
+            return False
+        except Exception as exc:                    # noqa: BLE001
+            print(f"{C_RED}Unexpected error: {exc}{C_RESET}")
+            audit.log_error("ROLLBACK_SESSION", str(exc))
+            return False
+        finally:
+            # A failure after connect used to leak the SSH session entirely.
+            if runner is not None:
+                runner.close()
+            audit.close()
 
-            except (NetmikoAuthenticationException, NetmikoTimeoutException) as conn_err:
-                print(f"{C_RED}Connection error: {conn_err}{C_RESET}")
-                audit.log_error("ROLLBACK_SESSION", str(conn_err))
-
-            except Exception as err:
-                print(f"{C_RED}Unexpected error: {err}{C_RESET}")
-                audit.log_error("ROLLBACK_SESSION", str(err))
-
+        if failed:
+            print(f"\n{C_RED}Rollback INCOMPLETE — {len(failed)} of "
+                  f"{len(executable)} command(s) were rejected:{C_RESET}")
+            for cmd in failed:
+                print(f"  {C_RED}- {cmd}{C_RESET}")
+            print(f"{C_YELLOW}The device is in a partially rolled-back state. "
+                  f"Review it before leaving the change window.{C_RESET}")
+        else:
+            print(f"\n{C_GREEN}Rollback pushed successfully — all "
+                  f"{len(executable)} command(s) accepted.{C_RESET}")
+        print(f"{C_CYAN}Audit log: {audit.log_path}{C_RESET}")
+        return not failed
 
 # ---------------------------------------------------------------------------
 # Strategy menu helpers for CLI
@@ -465,28 +527,45 @@ _STRATEGY_MENUS: dict[str, dict[str, str]] = {
         "2": "rollback         — Junos 'rollback N' + 'commit'",
         "3": "commit_confirmed — 'commit confirmed N' (auto-revert safety net)",
     },
-    "extreme": {
+    "exos": {
         "1": "exos       — EXOS save/load configuration file",
-        "2": "ers        — ERS copy config backup/restore",
-        "3": "vsp        — VSP copy running-config backup/restore",
-        "4": "inversion  — Invert EXOS commands (enable/disable/configure)",
+        "2": "inversion  — Invert EXOS commands (enable/disable/configure)",
+    },
+    "vsp": {
+        "1": "vsp        — VSP/VOSS backup + restore of running-config",
+    },
+    "ers": {
+        "1": "ers        — ERS/BOSS copy config backup + restore",
     },
 }
 
 _STRATEGY_KEYS: dict[str, dict[str, str]] = {
-    "cisco":   {"1": "inversion", "2": "archive"},
-    "junos":   {"1": "inversion", "2": "rollback", "3": "commit_confirmed"},
-    "extreme": {"1": "exos", "2": "ers", "3": "vsp", "4": "inversion"},
+    "cisco": {"1": "inversion", "2": "archive"},
+    "junos": {"1": "inversion", "2": "rollback", "3": "commit_confirmed"},
+    "exos":  {"1": "exos", "2": "inversion"},
+    "vsp":   {"1": "vsp"},
+    "ers":   {"1": "ers"},
+}
+
+# Accepted strategy names per vendor group — generate() validates against this
+# instead of silently defaulting an unrecognised strategy to 'inversion'.
+VALID_STRATEGIES: dict[str, tuple[str, ...]] = {
+    group: tuple(keys.values()) for group, keys in _STRATEGY_KEYS.items()
 }
 
 
 def _resolve_vendor_group(os_type: str) -> str:
+    """Map an OS type to its strategy family."""
     if os_type in OS_CISCO:
         return "cisco"
     if os_type in OS_JUNOS:
         return "junos"
+    if os_type in OS_VSP:
+        return "vsp"
+    if os_type in OS_ERS:
+        return "ers"
     if os_type in OS_EXOS:
-        return "extreme"
+        return "exos"
     return "cisco"
 
 
@@ -518,8 +597,11 @@ def run_interactive() -> None:
     print(f"\n{C_BOLD}Rollback strategies for {C_CYAN}{os_type}{C_RESET}{C_BOLD}:{C_RESET}")
     for key, desc in _STRATEGY_MENUS[vendor_group].items():
         print(f"  [{key}] {desc}")
-    strategy_choice = input("Strategy: ").strip()
-    strategy = _STRATEGY_KEYS[vendor_group].get(strategy_choice, "inversion")
+    strategy_choice = input("Strategy [1]: ").strip() or "1"
+    strategy = _STRATEGY_KEYS[vendor_group].get(strategy_choice)
+    if strategy is None:
+        print(f"{C_RED}Invalid strategy '{strategy_choice}'.{C_RESET}")
+        return
 
     # --- Collect applied commands (for inversion strategies) ---
     commands: list[str] = []
@@ -565,19 +647,23 @@ def run_interactive() -> None:
             print(f"{C_CYAN}{line}{C_RESET}")
 
     # --- Optionally push live ---
-    if check_dependency("netmiko"):
-        push = input(f"\n{C_YELLOW}Push this rollback to a device? (y/N): {C_RESET}").strip().lower()
-        if push == "y":
-            host     = input("Device IP: ").strip()
-            username = input("Username: ").strip()
-            password = getpass.getpass("Password: ")
-            secret   = getpass.getpass("Enable secret (blank if none): ")
+    if not check_dependency("netmiko"):
+        return
 
-            profile = build_ad_hoc_profile(
-                host=host,
-                device_type=os_type,
-                username=username,
-                password=password,
-                secret=secret,
-            )
-            engine.push(profile, rollback_cmds)
+    push = input(f"\n{C_YELLOW}Push this rollback to a device? (y/N): "
+                 f"{C_RESET}").strip().lower()
+    if push != "y":
+        return
+
+    target = pick_target(default_device_type=os_type)
+    if target is None:
+        return
+    _name, profile = target
+
+    if profile["device_type"] != os_type:
+        print(f"{C_RED}This script was generated for {os_type} but "
+              f"{profile['host']} is a {profile['device_type']} device — "
+              f"not pushing.{C_RESET}")
+        return
+
+    engine.push(profile, rollback_cmds)

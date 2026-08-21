@@ -1,14 +1,35 @@
-Features to add soon:
+Backlog
+=======
 
-ND-01 (Traceroute Path Analyzer) performs traceroute and highlights problematic hops by analyzing latency increases. It uses the system's traceroute command as a fallback, which means it will work even without scapy installed.
-DI-01 (SNMP Device Discovery) scans a network range using SNMP to gather device information. Since you have restrictions on installing tools, this uses Python's standard library for socket operations and basic SNMP packet construction. It's simplified but functional.
-DI-03 (Network Diagram Generator) creates ASCII network diagrams based on a simple input format. This helps visualize your network topology without requiring graphviz or other external tools.
-CM-03 (Configuration Rollback Generator) analyzes configuration changes and generates the reverse commands needed to undo them. This is particularly valuable for Cisco, Juniper, and Extreme switches.
-CM-04 (Configuration Snippet Library) provides a simple file-based system for storing and retrieving common configuration blocks, making it easy to reuse standard configurations.
-NP-01 (VLAN Planner and Tracker) helps manage VLAN assignments across your infrastructure with a JSON-based storage system.
+Shipped (was on this list)
+--------------------------
+ND-01  Traceroute Path Analyzer         -> features/diagnostics.py
+DI-01  SNMP Device Discovery            -> features/ip_hardware.py
+DI-03  Network Diagram Generator        -> features/config_tools.py
+CM-03  Configuration Rollback Generator -> features/rollback.py
+CM-04  Configuration Snippet Library    -> features/config_tools.py
+NP-01  VLAN Planner and Tracker         -> features/ip_hardware.py
+       Ping multiple clients at once    -> features/multiping.py (fping, ping fallback)
+       Comma-separated target lists     -> core/inventory.resolve_targets + expand_targets
+       CSV / JSON export                -> core/export.py
+       Inventory-driven targeting       -> core/prompts.py, inventory.json
+       Config backup scheduler          -> features/backup.py + cli.py backup
+       Pre/post change validator        -> features/validator.py + features/voss_parsers.py
+       Non-interactive CLI mode         -> cli.py
 
-ping multiple clients at once (figure out if they still exist?)
-comma seperate a list
-
-
-
+Next, roughly by value / effort
+-------------------------------
+1. Credential storage via `keyring` (or an age/sops-encrypted env file), so
+   unattended runs stop needing SYSNET_PASS in the environment.
+2. ERS/BOSS structured parsers, mirroring features/voss_parsers.py, so the
+   validator names ports and VLANs on ERS instead of falling back to a raw
+   output diff. Fixtures live in switch-migrator's tests/fixtures/ers/.
+3. Fleet audit report: fan out across the inventory, render one HTML or
+   Markdown health report (ports, neighbours, config drift) per run.
+4. Real SNMP support via pysnmp (walk + table getters), replacing the
+   hand-rolled BER encoder in features/ip_hardware.py.
+5. Offline/replay mode: run every tool against saved raw captures instead of
+   a device, the way switch-migrator's --offline works. The snapshots the
+   validator already writes are most of the raw material.
+6. Bundled OUI file for offline MAC vendor lookup (the old macvendors.co
+   tool was removed — the API now needs a key).

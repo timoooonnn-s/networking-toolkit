@@ -17,25 +17,20 @@ Usage
             return          # function exits gracefully with a printed hint
         ...
 
-BUG FIX NOTE
-------------
-The original monolith imported Netmiko at module load time and set
-HAS_NETMIKO = False on ImportError, but tool_ssh_bulk() still called
-ConnectHandler unconditionally from within the thread worker — meaning
-even when HAS_NETMIKO was True, a NameError could fire because
-ConnectHandler was imported inside a try block scoped to the top-level
-module but *not* re-exported into the global namespace used by the worker.
-
-Fix applied here:
-  - All Netmiko symbols are imported lazily *inside* the functions that
-    need them (see features/ssh_runner.py) so the namespace is always valid.
-  - This module only performs the availability check; it never re-exports
-    the library objects themselves.
+Why the libraries are never imported here
+----------------------------------------
+This module only answers "is it installed".  It deliberately does not import
+and re-export Netmiko, NAPALM or Jinja2, because a symbol bound at module
+level inside a try block is not reliably visible from a worker closure in
+another module — which is how the original monolith managed to raise
+NameError for ConnectHandler even when Netmiko *was* installed.  Every
+feature module imports what it needs lazily, inside the function that uses
+it, after calling check_dependency().
 """
 
 from __future__ import annotations
 
-from core.colors import C_RED, C_YELLOW, C_RESET
+from core.colors import C_RED, C_RESET, C_YELLOW
 
 # ---------------------------------------------------------------------------
 # Availability flags  (set once at import time)
@@ -94,7 +89,7 @@ def check_dependency(name: str) -> bool:
 
 def print_dependency_status() -> None:
     """Print a status table of all optional dependencies (useful at startup)."""
-    from core.colors import C_GREEN, C_BOLD
+    from core.colors import C_BOLD, C_GREEN
     print(f"\n{C_BOLD}Dependency Status:{C_RESET}")
     for name, available in _FLAG_MAP.items():
         status = f"{C_GREEN}OK{C_RESET}" if available else f"{C_RED}MISSING{C_RESET}"

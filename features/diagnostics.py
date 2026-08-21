@@ -3,9 +3,8 @@ features/diagnostics.py
 -----------------------
 Network Diagnostics Tools
 ==========================
-Refactored from the original monolith.  All tools in this module are
-stateless functions that read from stdin and write to stdout.  They have
-no dependencies on other feature modules — only on core.colors.
+All tools in this module are stateless functions that read from stdin and
+write to stdout.  They depend on nothing in features/ — only on core.
 
 Tools
 -----
@@ -26,10 +25,16 @@ import re
 import socket
 import ssl
 import subprocess
+import tempfile
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timezone
+from pathlib import Path
 
 from core.colors import C_BOLD, C_CYAN, C_GREEN, C_RED, C_RESET, C_YELLOW
+from core.export import offer_export
+
+# A hop slower than this is flagged in the traceroute analyser.
+HIGH_LATENCY_MS = 150.0
 
 
 # ---------------------------------------------------------------------------
@@ -46,7 +51,10 @@ def tool_cidr_calc() -> None:
         print(f"\n{C_GREEN}Network:  {C_RESET} {network.network_address}")
         print(f"{C_GREEN}Netmask:  {C_RESET} {network.netmask}")
         print(f"{C_GREEN}Broadcast:{C_RESET} {network.broadcast_address}")
-        print(f"{C_GREEN}Hosts:    {C_RESET} {network.num_addresses - 2} usable")
+        # len(hosts) rather than num_addresses - 2: a /32 is one host and a
+        # /31 is a two-host point-to-point link (RFC 3021), so the blanket
+        # "minus network and broadcast" printed "-1 usable" and "0 usable".
+        print(f"{C_GREEN}Hosts:    {C_RESET} {len(hosts)} usable")
         if hosts:
             print(f"{C_GREEN}Range:    {C_RESET} {hosts[0]} – {hosts[-1]}")
     except ValueError as exc:
@@ -110,8 +118,12 @@ def tool_traceroute_analyze() -> None:
         )
         for line in process.stdout:
             line = line.rstrip()
-            ms_values = [int(m) for m in re.findall(r"(\d+)\s*ms", line)]
-            if ms_values and max(ms_values) > 150:
+            # Capture the WHOLE number, fraction included.  r"(\d+)\s*ms"
+            # matched only the digits directly before 'ms', so '12.345 ms'
+            # parsed as 345 (a false HIGH LATENCY) and '210.5 ms' as 5 (a
+            # missed one).
+            ms_values = [float(m) for m in re.findall(r"(\d+(?:\.\d+)?)\s*ms", line)]
+            if ms_values and max(ms_values) > HIGH_LATENCY_MS:
                 print(f"{C_RED}{line}  ← HIGH LATENCY{C_RESET}")
             elif "*" in line:
                 print(f"{C_YELLOW}{line}  ← TIMEOUT{C_RESET}")
@@ -129,22 +141,89 @@ def tool_traceroute_analyze() -> None:
 # SSL Certificate Expiry Checker
 # ---------------------------------------------------------------------------
 
+def _decode_cert(der: bytes) -> dict:
+    """
+    Decode a DER certificate into the same dict shape getpeercert() returns.
+
+    Needed because ``getpeercert()`` yields nothing on an *unverified*
+    connection, which is exactly the connection an expired or self-signed
+    certificate forces.  ``cryptography`` is used when it is installed (it
+    comes in with Netmiko via Paramiko); otherwise the certificate is written
+    out as PEM and decoded by the ssl module's own decoder.
+    """
+    try:
+        from cryptography import x509
+
+        cert = x509.load_der_x509_certificate(der)
+        expires = cert.not_valid_after_utc
+        return {"notAfter": expires.strftime("%b %d %H:%M:%S %Y GMT")}
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException:      # noqa: BLE001
+        # Deliberately wider than ImportError: a cryptography install with a
+        # broken native backend raises pyo3's PanicException, which is not an
+        # Exception at all.  The stdlib fallback below still does the job, so
+        # a broken optional dependency must not take the tool down with it.
+        pass
+
+    pem = ssl.DER_cert_to_PEM_cert(der)
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "peer.pem"
+        path.write_text(pem)
+        return ssl._ssl._test_decode_cert(str(path))     # noqa: SLF001
+
+
+def _fetch_cert(hostname: str, port: int = 443) -> tuple[dict, str]:
+    """
+    Return (certificate dict, verification note) for *hostname*.
+
+    A verifying context is tried first, so a healthy certificate is also
+    confirmed as trusted.  When verification fails the connection is retried
+    *unverified* — an expired or self-signed certificate is precisely what
+    this tool exists to report, and refusing the handshake made it unable to
+    check the only cases that matter.
+    """
+    context = ssl.create_default_context()
+    try:
+        with (
+            socket.create_connection((hostname, port), timeout=5) as raw,
+            context.wrap_socket(raw, server_hostname=hostname) as tls,
+        ):
+            return tls.getpeercert(), ""
+    except ssl.SSLCertVerificationError as exc:
+        note = f"chain NOT trusted: {exc.verify_message or exc.reason}"
+
+    unverified = ssl._create_unverified_context()
+    with (
+        socket.create_connection((hostname, port), timeout=5) as raw,
+        unverified.wrap_socket(raw, server_hostname=hostname) as tls,
+    ):
+        der = tls.getpeercert(binary_form=True)
+    return _decode_cert(der), note
+
+
 def tool_ssl_expiry() -> None:
     """Check the TLS certificate expiry date for a domain."""
     print(f"{C_BOLD}--- SSL Certificate Expiry Checker ---{C_RESET}")
-    hostname = input("Domain (e.g., google.com): ").strip()
+    raw_host = input("Domain (e.g., google.com, or host:port): ").strip()
+    if not raw_host:
+        print(f"{C_RED}No domain given.{C_RESET}")
+        return
 
-    context = ssl.create_default_context()
+    hostname, _, port_str = raw_host.partition(":")
+    port = int(port_str) if port_str.isdigit() else 443
+
     try:
-        with socket.create_connection((hostname, 443), timeout=5) as raw_sock:
-            with context.wrap_socket(raw_sock, server_hostname=hostname) as tls_sock:
-                cert        = tls_sock.getpeercert()
-                expire_str  = cert["notAfter"]
-                expire_date = datetime.strptime(expire_str, "%b %d %H:%M:%S %Y %Z")
-                remaining   = expire_date - datetime.utcnow()
+        cert, note = _fetch_cert(hostname, port)
+        expire_date = datetime.strptime(
+            cert["notAfter"], "%b %d %H:%M:%S %Y %Z"
+        ).replace(tzinfo=timezone.utc)
+        remaining = expire_date - datetime.now(timezone.utc)
 
-        print(f"\n{C_CYAN}Certificate for {hostname}:{C_RESET}")
+        print(f"\n{C_CYAN}Certificate for {hostname}:{port}{C_RESET}")
         print(f"  Expires On: {expire_date.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+        if note:
+            print(f"  {C_YELLOW}{note}{C_RESET}")
 
         if remaining.days < 0:
             print(f"  {C_RED}Status: EXPIRED ({abs(remaining.days)} days ago){C_RESET}")
@@ -153,6 +232,8 @@ def tool_ssl_expiry() -> None:
         else:
             print(f"  {C_GREEN}Status: OK — {remaining.days} days remaining{C_RESET}")
 
+    except (KeyError, ValueError) as exc:
+        print(f"{C_RED}Could not read the certificate's expiry date: {exc}{C_RESET}")
     except Exception as exc:
         print(f"{C_RED}Connection/TLS error: {exc}{C_RESET}")
 
@@ -168,6 +249,8 @@ def tool_bulk_dns() -> None:
     print("  2. Reverse-resolve IPs → hostnames")
     mode = input("> ").strip()
 
+    rows: list[dict[str, str]] = []
+
     if mode == "1":
         raw   = input("Hostnames (comma-separated): ").strip()
         hosts = [h.strip() for h in raw.split(",") if h.strip()]
@@ -177,8 +260,11 @@ def tool_bulk_dns() -> None:
             try:
                 ip = socket.gethostbyname(host)
                 print(f"{host:<30} {C_GREEN}{ip}{C_RESET}")
-            except socket.gaierror:
+                rows.append({"query": host, "result": ip, "status": "ok"})
+            except (socket.gaierror, OSError) as exc:
                 print(f"{host:<30} {C_RED}Resolution failed{C_RESET}")
+                rows.append({"query": host, "result": "",
+                             "status": f"failed ({exc.__class__.__name__})"})
 
     elif mode == "2":
         raw = input("IPs (comma-separated): ").strip()
@@ -189,10 +275,19 @@ def tool_bulk_dns() -> None:
             try:
                 hostname = socket.gethostbyaddr(ip)[0]
                 print(f"{ip:<20} {C_GREEN}{hostname}{C_RESET}")
-            except socket.herror:
-                print(f"{ip:<20} {C_RED}Resolution failed{C_RESET}")
+                rows.append({"query": ip, "result": hostname, "status": "ok"})
+            except (socket.herror, socket.gaierror, OSError) as exc:
+                # gaierror fires on a malformed entry ("192.168.1"), and used
+                # to escape this handler and kill the whole session over one
+                # bad line in a pasted list.
+                print(f"{ip:<20} {C_RED}Resolution failed ({exc.__class__.__name__}){C_RESET}")
+                rows.append({"query": ip, "result": "",
+                             "status": f"failed ({exc.__class__.__name__})"})
     else:
         print(f"{C_RED}Invalid option.{C_RESET}")
+        return
+
+    offer_export(rows, "dns_resolution")
 
 
 # ---------------------------------------------------------------------------

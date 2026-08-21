@@ -9,7 +9,9 @@ napalm_interface.NAPALMSession and highlights performance anomalies:
   • CRC / input errors above threshold
   • Output drops above threshold
   • Link flap detection (last_flapped < FLAP_WINDOW_SECS)
-  • Interface utilisation % (requires speed + octet counters)
+  • Interface utilisation % — measured from two counter samples taken
+    SAMPLE_INTERVAL_SECS apart, since utilisation is a rate and cannot be
+    derived from a single snapshot
 
 All thresholds are configurable via module-level constants so they can be
 overridden in unit tests or by an operator without editing business logic.
@@ -41,15 +43,20 @@ Usage (interactive)
 
 from __future__ import annotations
 
-import getpass
 from dataclasses import dataclass, field
 from typing import Any
 
 from core.colors import (
-    C_BOLD, C_CYAN, C_GREEN, C_RED, C_RESET, C_YELLOW,
+    C_BOLD,
+    C_CYAN,
+    C_GREEN,
+    C_RED,
+    C_RESET,
+    C_YELLOW,
 )
 from core.dependency_check import check_dependency
-from core.inventory import SUPPORTED_OS
+from core.export import offer_export
+from core.prompts import pick_target
 
 # ---------------------------------------------------------------------------
 # Configurable thresholds
@@ -163,28 +170,90 @@ def _check_counters(
     return anomalies
 
 
-def _estimate_utilisation(
+def utilisation_from_samples(
     iface_data:   dict[str, Any],
-    counter_data: dict[str, Any],
-) -> float | None:
+    first:        dict[str, Any],
+    second:       dict[str, Any],
+    interval_secs: float,
+) -> tuple[float | None, float | None]:
     """
-    Estimate current utilisation percentage.
+    Return (rx_percent, tx_percent) from two counter samples of one interface.
 
-    This is a *snapshot* estimate using octet counters and interface speed.
-    For a true rate you'd sample twice and divide by the interval — the
-    live_utilisation() function below does that.  Here we return None if
-    we can't compute a meaningful value from a single snapshot.
+    Utilisation is a *rate*, so it needs two readings and the time between
+    them — this replaces an earlier ``_estimate_utilisation()`` that took a
+    single snapshot, always returned None, was never called, and pointed at a
+    ``live_utilisation()`` that did not exist.  The advertised utilisation
+    check therefore never fired at all.
+
+    Returns (None, None) when the interface reports no speed (a virtual or
+    unnegotiated port has no line rate to be a percentage of) or when the
+    counters wrapped or were reset between samples — a negative delta is
+    meaningless, and reporting it as 0% would hide a real reset.
     """
-    speed_mbps = iface_data.get("speed", 0) or 0
-    if speed_mbps <= 0:
-        return None
+    speed_mbps = iface_data.get("speed") or 0
+    if speed_mbps <= 0 or interval_secs <= 0:
+        return None, None
 
-    rx_octets = counter_data.get("rx_octets", 0) or 0
-    tx_octets = counter_data.get("tx_octets", 0) or 0
+    def rate_pct(key: str) -> float | None:
+        delta = (second.get(key) or 0) - (first.get(key) or 0)
+        if delta < 0:                       # counter wrap or clear
+            return None
+        bits_per_sec = (delta * 8) / interval_secs
+        capacity     = speed_mbps * 1_000_000
+        return min(100.0, (bits_per_sec / capacity) * 100)
 
-    # Without a time-delta a single snapshot is meaningless — return None
-    # and let callers use live_utilisation() for real rates.
-    return None
+    return rate_pct("rx_octets"), rate_pct("tx_octets")
+
+
+def check_utilisation(
+    iface_name: str,
+    rx_pct: float | None,
+    tx_pct: float | None,
+) -> list[InterfaceAnomaly]:
+    """Flag an interface whose measured utilisation crosses a threshold."""
+    anomalies: list[InterfaceAnomaly] = []
+    for direction, value in (("RX", rx_pct), ("TX", tx_pct)):
+        if value is None or value < UTILISATION_WARN_PCT:
+            continue
+        anomalies.append(InterfaceAnomaly(
+            interface=iface_name,
+            severity="CRIT" if value >= UTILISATION_CRIT_PCT else "WARN",
+            category="UTILISATION",
+            detail=(
+                f"{direction} utilisation {value:.1f}% "
+                f"(warn: {UTILISATION_WARN_PCT}%, crit: {UTILISATION_CRIT_PCT}%)"
+            ),
+        ))
+    return anomalies
+
+
+def sample_utilisation(
+    session: Any,
+    interfaces: dict[str, dict[str, Any]],
+    interval_secs: float = SAMPLE_INTERVAL_SECS,
+) -> dict[str, tuple[float | None, float | None]]:
+    """
+    Take two counter samples *interval_secs* apart over an open NAPALM
+    session and return {interface: (rx_pct, tx_pct)}.
+
+    The caller keeps the session open across the wait, so the two samples come
+    from the same device session and the interval is the real elapsed time
+    rather than the nominal one.
+    """
+    import time
+
+    first  = session.get_interfaces_counters()
+    started = time.monotonic()
+    time.sleep(interval_secs)
+    second  = session.get_interfaces_counters()
+    elapsed = time.monotonic() - started
+
+    return {
+        name: utilisation_from_samples(
+            interfaces.get(name, {}), first.get(name, {}), second.get(name, {}), elapsed
+        )
+        for name in second
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -192,9 +261,10 @@ def _estimate_utilisation(
 # ---------------------------------------------------------------------------
 
 def build_health_report(
-    interfaces: dict[str, dict[str, Any]],
-    counters:   dict[str, dict[str, Any]],
-    host:       str = "unknown",
+    interfaces:  dict[str, dict[str, Any]],
+    counters:    dict[str, dict[str, Any]],
+    host:        str = "unknown",
+    utilisation: dict[str, tuple[float | None, float | None]] | None = None,
 ) -> HealthReport:
     """
     Build a HealthReport from normalized NAPALM interface + counter dicts.
@@ -207,6 +277,9 @@ def build_health_report(
         Output of NAPALMSession.get_interfaces_counters()
     host : str
         Device hostname/IP (for report labelling only).
+    utilisation : dict | None
+        Optional {interface: (rx_pct, tx_pct)} from sample_utilisation().
+        Omitted when the operator declined the extra sampling wait.
 
     Returns
     -------
@@ -223,6 +296,11 @@ def build_health_report(
         # Counter checks (only if counter data available for this interface)
         if iface_name in counters:
             iface_anomalies.extend(_check_counters(iface_name, counters[iface_name]))
+
+        # Utilisation checks (only when two samples were actually taken)
+        if utilisation and iface_name in utilisation:
+            rx_pct, tx_pct = utilisation[iface_name]
+            iface_anomalies.extend(check_utilisation(iface_name, rx_pct, tx_pct))
 
         if iface_anomalies:
             report.anomalies.extend(iface_anomalies)
@@ -294,25 +372,47 @@ def run_interactive() -> None:
     if not check_dependency("napalm"):
         return
 
-    # Import here to avoid circular import at module load time
+    # Imported here to avoid a circular import at module load time.
     from features.napalm_interface import NAPALMSession
 
     print(f"{C_BOLD}--- Interface Health Dashboard ---{C_RESET}")
 
-    host        = input("Device IP/Hostname: ").strip()
-    print(f"Device type options: {', '.join(SUPPORTED_OS)}")
-    device_type = input("Device type (default: cisco_ios): ").strip() or "cisco_ios"
-    username    = input("Username: ").strip()
-    password    = getpass.getpass("Password: ")
+    target = pick_target(default_device_type="cisco_ios")
+    if target is None:
+        return
+    _name, profile = target
+    host = profile["host"]
+
+    measure = input(
+        f"Measure utilisation too? Adds a {SAMPLE_INTERVAL_SECS}s sampling "
+        f"wait (y/N): "
+    ).strip().lower() == "y"
 
     try:
         print(f"\n{C_CYAN}Connecting to {host} and fetching interface data ...{C_RESET}")
-        with NAPALMSession(host, device_type, username, password) as sess:
+        with NAPALMSession(host, profile["device_type"],
+                           profile["username"], profile["password"]) as sess:
             ifaces   = sess.get_interfaces()
             counters = sess.get_interfaces_counters()
+            utilisation = None
+            if measure:
+                print(f"{C_CYAN}Sampling counters for "
+                      f"{SAMPLE_INTERVAL_SECS}s ...{C_RESET}")
+                utilisation = sample_utilisation(sess, ifaces)
 
-        report = build_health_report(ifaces, counters, host=host)
+        report = build_health_report(ifaces, counters, host=host,
+                                     utilisation=utilisation)
         print_dashboard(report)
 
+        if report.has_issues:
+            offer_export(
+                [{"interface": a.interface, "severity": a.severity,
+                  "category": a.category, "detail": a.detail}
+                 for a in report.anomalies],
+                f"interface_health_{host.replace('.', '_')}",
+            )
+
+    except ValueError as err:
+        print(f"{C_RED}{err}{C_RESET}")
     except Exception as err:
         print(f"{C_RED}Error: {err}{C_RESET}")

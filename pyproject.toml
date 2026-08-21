@@ -1,0 +1,34 @@
+# Tooling configuration only — the toolkit is run from its source tree
+# (python3 main_menu.py / python3 cli.py), not installed as a package.
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts   = "-q"
+# The suite runs entirely offline against captured device output: no device,
+# no network, no fping.  A test that needs any of those does not belong here.
+
+[tool.ruff]
+line-length    = 100
+target-version = "py310"
+exclude        = ["tests/fixtures", "backups", "snapshots", "exports", "logs"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle
+    "F",    # pyflakes
+    "W",    # warnings
+    "I",    # import sorting
+    "UP",   # pyupgrade
+    "B",    # bugbear
+    "C4",   # comprehensions
+    "SIM",  # simplify
+]
+ignore = [
+    "E501",    # long lines: the column-aligned tables and banners are deliberate
+    "B008",    # function call in default argument
+    "SIM105",  # contextlib.suppress over try/except/pass — less readable here
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests deliberately reach into private helpers to pin behaviour.
+"tests/*" = ["SLF001"]

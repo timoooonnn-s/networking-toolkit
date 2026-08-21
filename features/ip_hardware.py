@@ -2,17 +2,20 @@
 features/ip_hardware.py
 -----------------------
 IP Address & Hardware Tools
-============================
-Refactored from the original monolith's Category E & F.
 
 Tools
 -----
-    tool_mac_oui()        — MAC vendor lookup via macvendors.co API
     tool_snmp_discovery() — Manual SNMPv2c sysDescr getter (no pysnmp needed)
     tool_vlan_tracker()   — JSON-backed VLAN planner/tracker
     tool_next_ip()        — Next free IP in a subnet
-    tool_ping_sweep()     — Threaded LAN ping sweep
     tool_bandwidth_mon()  — Real-time RX/TX bandwidth from /proc/net/dev
+
+Reachability sweeps live in features/multiping.py, which uses fping when it
+is available and the system ping otherwise.
+
+The MAC vendor lookup that used to live here was removed: it depended on
+macvendors.co, which now requires an API key, so the tool could only ever
+print an error.
 """
 
 from __future__ import annotations
@@ -22,53 +25,14 @@ import json
 import os
 import platform
 import random
-import re
-import struct
 import socket
-import subprocess
+import struct
 import sys
 import time
-import urllib.request
-from concurrent.futures import ThreadPoolExecutor
 
 from core.colors import C_BOLD, C_CYAN, C_GREEN, C_RED, C_RESET, C_YELLOW
-
-VLAN_DB_FILE = "sysnet_vlans.json"
-
-
-# ---------------------------------------------------------------------------
-# MAC Vendor Lookup
-# ---------------------------------------------------------------------------
-
-def tool_mac_oui() -> None:
-    """Look up the vendor for a MAC address via the macvendors.co API."""
-    print(f"{C_BOLD}--- MAC Address Vendor Lookup ---{C_RESET}")
-    mac       = input("Enter MAC address (any format): ").strip()
-    clean_mac = re.sub(r"[.:\-]", "", mac).upper()
-
-    if len(clean_mac) < 6:
-        print(f"{C_RED}Invalid MAC — too short.{C_RESET}")
-        return
-
-    print("Querying macvendors.co …")
-    try:
-        url = f"https://macvendors.co/api/{clean_mac}"
-        req = urllib.request.Request(url, headers={"User-Agent": "SysNet-Toolkit/2.2"})
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            data   = json.loads(resp.read().decode())
-            result = data.get("result", {})
-
-        company = result.get("company")
-        if company:
-            print(f"\n{C_GREEN}Vendor:    {C_RESET}{company}")
-            print(f"{C_GREEN}Address:   {C_RESET}{result.get('address', 'N/A')}")
-            print(f"{C_GREEN}MAC Prefix:{C_RESET}{result.get('mac_prefix', 'N/A')}")
-        else:
-            print(f"{C_YELLOW}Vendor not found for this OUI.{C_RESET}")
-
-    except Exception as exc:
-        print(f"{C_RED}API error: {exc}{C_RESET}")
-
+from core.export import offer_export
+from core.paths import VLAN_DB_FILE
 
 # ---------------------------------------------------------------------------
 # SNMP Device Discovery (SNMPv2c, stdlib only)
@@ -92,7 +56,7 @@ def tool_snmp_discovery() -> None:
 
     def _build_packet(comm: str, oid: str = "1.3.6.1.2.1.1.1.0") -> bytes:
         # Encode OID
-        parts    = [int(x) for x in oid.split(".")]
+        parts     = [int(x) for x in oid.split(".")]
         oid_bytes = bytearray([parts[0] * 40 + parts[1]])
         for val in parts[2:]:
             if val < 128:
@@ -117,8 +81,8 @@ def tool_snmp_discovery() -> None:
         )
         pdu = b"\xa0" + _encode_len(len(pdu_content)) + pdu_content
 
-        comm_enc  = comm.encode()
-        msg_body  = (
+        comm_enc = comm.encode()
+        msg_body = (
             b"\x02\x01\x01"
             + b"\x04" + bytes([len(comm_enc)]) + comm_enc
             + pdu
@@ -143,7 +107,7 @@ def tool_snmp_discovery() -> None:
         if not found:
             print(f"{C_YELLOW}Response received but could not decode sysDescr string.{C_RESET}")
 
-    except socket.timeout:
+    except TimeoutError:
         print(f"{C_RED}Timeout — no response from {target_ip}. (Check IP, community, firewall){C_RESET}")
     except Exception as exc:
         print(f"{C_RED}Error: {exc}{C_RESET}")
@@ -158,21 +122,23 @@ def tool_snmp_discovery() -> None:
 def _load_vlans() -> dict:
     if os.path.exists(VLAN_DB_FILE):
         try:
-            with open(VLAN_DB_FILE) as f:
-                return json.load(f)
-        except (json.JSONDecodeError, OSError):
-            pass
+            with open(VLAN_DB_FILE) as handle:
+                return json.load(handle)
+        except (json.JSONDecodeError, OSError) as exc:
+            print(f"{C_YELLOW}Could not read {VLAN_DB_FILE} ({exc}) — "
+                  f"starting from an empty database.{C_RESET}")
     return {}
 
 
 def _save_vlans(vlans: dict) -> None:
-    with open(VLAN_DB_FILE, "w") as f:
-        json.dump(vlans, f, indent=4)
+    with open(VLAN_DB_FILE, "w") as handle:
+        json.dump(vlans, handle, indent=4)
 
 
 def tool_vlan_tracker() -> None:
     """Manage a persistent JSON VLAN database (add/list/delete VLANs)."""
     print(f"{C_BOLD}--- VLAN Planner & Tracker ---{C_RESET}")
+    print(f"{C_CYAN}Database: {VLAN_DB_FILE}{C_RESET}")
     vlans = _load_vlans()
     print(f"Tracking {len(vlans)} VLAN(s).")
     print("  1. List VLANs")
@@ -186,14 +152,20 @@ def tool_vlan_tracker() -> None:
             return
         print(f"\n{C_BOLD}{'ID':<6} {'Name':<22} {'Subnet / Description'}{C_RESET}")
         print("─" * 55)
+        rows = []
         for vid in sorted(vlans, key=lambda x: int(x)):
             info = vlans[vid]
-            print(f"{vid:<6} {C_GREEN}{info['name']:<22}{C_RESET} {info['desc']}")
+            print(f"{vid:<6} {C_GREEN}{info.get('name', ''):<22}{C_RESET} "
+                  f"{info.get('desc', '')}")
+            rows.append({"vlan_id": vid,
+                         "name": info.get("name", ""),
+                         "description": info.get("desc", "")})
+        offer_export(rows, "vlans")
 
     elif choice == "2":
         vid = input("VLAN ID (number): ").strip()
-        if not vid.isdigit():
-            print(f"{C_RED}VLAN ID must be numeric.{C_RESET}")
+        if not vid.isdigit() or not 1 <= int(vid) <= 4094:
+            print(f"{C_RED}VLAN ID must be a number between 1 and 4094.{C_RESET}")
             return
         name = input("VLAN Name: ").strip()
         desc = input("Subnet / Description: ").strip()
@@ -244,49 +216,33 @@ def tool_next_ip() -> None:
 
 
 # ---------------------------------------------------------------------------
-# LAN Ping Sweep
-# ---------------------------------------------------------------------------
-
-def _ping_once(ip: str) -> bool:
-    """Return True if *ip* responds to a single ICMP ping."""
-    flag = "-n" if platform.system().lower() == "windows" else "-c"
-    return (
-        subprocess.call(
-            ["ping", flag, "1", ip],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        == 0
-    )
-
-
-def tool_ping_sweep() -> None:
-    """Ping all hosts in a /24 subnet and report which are up."""
-    print(f"{C_BOLD}--- LAN Ping Sweep ---{C_RESET}")
-    base = input("Base IP prefix (e.g. 192.168.1): ").strip()
-
-    if base.count(".") != 2:
-        print(f"{C_RED}Use a three-octet prefix like 192.168.1{C_RESET}")
-        return
-
-    print(f"Sweeping {base}.1 – {base}.254 with 20 threads …\n")
-    active: list[str] = []
-
-    def check(i: int) -> None:
-        ip = f"{base}.{i}"
-        if _ping_once(ip):
-            print(f"{C_GREEN}[+] {ip}{C_RESET}")
-            active.append(ip)
-
-    with ThreadPoolExecutor(max_workers=20) as pool:
-        pool.map(check, range(1, 255))
-
-    print(f"\n{C_BOLD}Sweep complete. {len(active)} active host(s) found.{C_RESET}")
-
-
-# ---------------------------------------------------------------------------
 # Real-Time Bandwidth Monitor (Linux only)
 # ---------------------------------------------------------------------------
+
+def _read_iface_bytes(iface: str) -> tuple[int, int] | tuple[None, None]:
+    """
+    Return (rx_bytes, tx_bytes) for *iface* from /proc/net/dev.
+
+    The interface name is matched exactly against the column before the colon.
+    Substring matching used to make 'eth0' pick up 'veth0abc' or 'eth0.100'
+    counters — and match the header line, which has no numeric columns at all.
+    """
+    try:
+        with open("/proc/net/dev") as handle:
+            for line in handle:
+                if ":" not in line:
+                    continue
+                name, _, stats = line.partition(":")
+                if name.strip() != iface:
+                    continue
+                columns = stats.split()
+                if len(columns) < 9:
+                    return None, None
+                return int(columns[0]), int(columns[8])   # RX bytes, TX bytes
+    except OSError:
+        return None, None
+    return None, None
+
 
 def tool_bandwidth_mon() -> None:
     """Display real-time RX/TX bandwidth by reading /proc/net/dev."""
@@ -297,16 +253,11 @@ def tool_bandwidth_mon() -> None:
         return
 
     iface = input("Interface (e.g. eth0, wlan0): ").strip()
+    if not iface:
+        print(f"{C_RED}No interface given.{C_RESET}")
+        return
 
-    def _read_bytes() -> tuple[int, int] | tuple[None, None]:
-        with open("/proc/net/dev") as f:
-            for line in f:
-                if iface in line:
-                    cols = line.split(":")[1].split()
-                    return int(cols[0]), int(cols[8])   # RX, TX bytes
-        return None, None
-
-    rx1, tx1 = _read_bytes()
+    rx1, tx1 = _read_iface_bytes(iface)
     if rx1 is None:
         print(f"{C_RED}Interface '{iface}' not found in /proc/net/dev.{C_RESET}")
         return
@@ -315,8 +266,9 @@ def tool_bandwidth_mon() -> None:
     try:
         while True:
             time.sleep(1)
-            rx2, tx2 = _read_bytes()
+            rx2, tx2 = _read_iface_bytes(iface)
             if rx2 is None:
+                print(f"\n{C_RED}Interface '{iface}' disappeared.{C_RESET}")
                 break
             rx_kbps = (rx2 - rx1) / 1024
             tx_kbps = (tx2 - tx1) / 1024
