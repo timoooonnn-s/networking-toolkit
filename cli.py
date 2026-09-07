@@ -12,6 +12,8 @@ change-window script instead of only from a keyboard:
     python3 cli.py run       --targets all --command "show sys-info"
     python3 cli.py snapshot  --target core-vsp-01 --label pre
     python3 cli.py compare   --pre snapshots/a.json --post snapshots/b.json
+    python3 cli.py snmp      preset --target core-vsp-01 --preset if-oper-status
+    python3 cli.py snmp      preset --target core-vsp-01 --preset port-up --port 1/1 --yes
     python3 cli.py inventory
 
 Credentials come from $SYSNET_USER / $SYSNET_PASS.  When they are absent and
@@ -36,6 +38,14 @@ from core.colors import C_BOLD, C_CYAN, C_GREEN, C_RED, C_RESET, C_YELLOW, VERSI
 EXIT_OK       = 0
 EXIT_FINDINGS = 1
 EXIT_ERROR    = 2
+
+
+class _NoPreset:
+    """Stand-in so an unknown preset name is reported, not crashed on."""
+    writes = False
+
+
+_NO_PRESET = _NoPreset()
 
 
 # ---------------------------------------------------------------------------
@@ -246,6 +256,125 @@ def cmd_compare(args: argparse.Namespace) -> int:
     return EXIT_FINDINGS if critical else EXIT_OK
 
 
+def cmd_snmp(args: argparse.Namespace) -> int:
+    """
+    SNMP reads and writes from the command line.
+
+    Writes need --yes.  Requiring it explicitly is the point: an unattended
+    SNMP SET against the wrong ifIndex takes a port down, and there is no
+    confirmation prompt out here to catch it.
+    """
+    from core.export import export_rows
+    from core.inventory import load_inventory, resolve_targets
+    from core.snmp import snmp_get, snmp_set, snmp_walk
+    from features.snmp_assistant import (
+        annotate,
+        build_ifindex_map,
+        credentials_for,
+        describe_write,
+        print_presets,
+        print_result,
+        resolve_ifindex,
+        run_preset,
+    )
+    from features.snmp_presets import PresetStore
+
+    store = PresetStore.load()
+
+    if args.snmp_action == "presets":
+        print_presets(store.matching(platform=args.platform or "",
+                                     writes_only=args.writes_only))
+        return EXIT_OK
+
+    # --- resolve the target through the inventory when it knows the name ---
+    inventory = load_inventory()
+    # quiet: the SNMP tools accept a bare IP, so "not in the inventory"
+    # is an ordinary case here rather than something to warn about.
+    matches   = resolve_targets(args.target, inventory, quiet=True)
+    if matches:
+        name, entry = matches[0]
+        host = entry["host"]
+        if len(matches) > 1:
+            print(f"{C_YELLOW}'{args.target}' matched {len(matches)} devices; "
+                  f"using '{name}'.{C_RESET}", file=sys.stderr)
+    else:
+        host, entry = args.target, {}
+
+    writes = args.snmp_action == "set" or (
+        args.snmp_action == "preset"
+        and (store.get(args.preset) or _NO_PRESET).writes
+    )
+
+    # Unattended runs must not stop on a getpass prompt nothing can answer.
+    creds = credentials_for(entry, write=writes, prompt=sys.stdin.isatty())
+    problem = creds.validate()
+    if problem:
+        print(f"{C_RED}{problem}{C_RESET}", file=sys.stderr)
+        print(f"{C_YELLOW}Set SNMP_COMMUNITY (or SNMP_WRITE_COMMUNITY for "
+              f"writes), or the SNMP_V3_* variables for v3.{C_RESET}",
+              file=sys.stderr)
+        return EXIT_ERROR
+
+    # --- ifIndex, when the operation needs one ---
+    ifindex = args.ifindex
+    if args.port and not ifindex:
+        mapping, error = build_ifindex_map(host, credentials_for(entry, prompt=False))
+        if not mapping:
+            print(f"{C_RED}Could not read the interface table: "
+                  f"{error or 'no rows returned'}{C_RESET}", file=sys.stderr)
+            return EXIT_ERROR
+        ifindex = resolve_ifindex(args.port, mapping)
+        if ifindex is None:
+            print(f"{C_RED}'{args.port}' did not match exactly one "
+                  f"interface.{C_RESET}", file=sys.stderr)
+            return EXIT_ERROR
+        print(f"{C_CYAN}{args.port} → ifIndex {ifindex}{C_RESET}")
+
+    # --- run it ---
+    if args.snmp_action == "preset":
+        preset = store.get(args.preset)
+        if preset is None:
+            print(f"{C_RED}No preset called '{args.preset}'. "
+                  f"List them with: cli.py snmp presets{C_RESET}", file=sys.stderr)
+            return EXIT_ERROR
+        if preset.writes and not args.yes:
+            try:
+                oid, value = preset.resolve(ifindex=ifindex, value=args.value)
+            except ValueError as exc:
+                print(f"{C_RED}{exc}{C_RESET}", file=sys.stderr)
+                return EXIT_ERROR
+            print(f"{C_RED}This preset WRITES to the device:{C_RESET}")
+            print(describe_write(preset, host, oid, value, creds))
+            print(f"{C_YELLOW}Re-run with --yes to send it.{C_RESET}")
+            return EXIT_ERROR
+        result = run_preset(preset, host, creds, ifindex=ifindex, value=args.value)
+        title  = f"{preset.name} on {host}"
+
+    elif args.snmp_action == "get":
+        result = snmp_get(host, args.oid, creds)
+        title  = f"GET on {host}"
+
+    elif args.snmp_action == "walk":
+        result = snmp_walk(host, args.oid[0], creds)
+        title  = f"WALK {args.oid[0]} on {host}"
+
+    else:   # set
+        if not args.yes:
+            print(f"{C_RED}Refusing to write without --yes.{C_RESET}",
+                  file=sys.stderr)
+            print(f"  {host}  {args.oid[0]} = {args.type}:{args.value}",
+                  file=sys.stderr)
+            return EXIT_ERROR
+        result = snmp_set(host, args.oid[0], args.type, args.value, creds)
+        title  = f"SET {args.oid[0]} on {host}"
+
+    print_result(result, title)
+    if result.ok and args.format:
+        export_rows(annotate(result.varbinds), f"snmp_{args.snmp_action}",
+                    fmt=args.format, path=args.out)
+    return EXIT_OK if result.ok else EXIT_FINDINGS
+
+
 def cmd_inventory(args: argparse.Namespace) -> int:
     from core.export import export_rows
     from core.inventory import load_inventory, resolve_targets
@@ -360,6 +489,57 @@ def build_parser() -> argparse.ArgumentParser:
     add_export_flags(compare)
     compare.set_defaults(func=cmd_compare)
 
+    # --- snmp ---
+    snmp = subparsers.add_parser(
+        "snmp", help="SNMP reads and writes, with a saved-preset library")
+    snmp_actions = snmp.add_subparsers(dest="snmp_action", required=True)
+
+    def add_snmp_target(sub: argparse.ArgumentParser, needs_target: bool = True) -> None:
+        if needs_target:
+            sub.add_argument("--target", required=True,
+                             help="inventory device name, or a bare IP/hostname")
+            sub.add_argument("--port", help="port NAME to resolve to an ifIndex "
+                                            "(e.g. 1/1); walks ifName to do it")
+            sub.add_argument("--ifindex", help="ifIndex directly, skipping the walk")
+        add_export_flags(sub)
+
+    snmp_get_p = snmp_actions.add_parser("get", help="read one or more OIDs")
+    snmp_get_p.add_argument("--oid", required=True, action="append",
+                            help="numeric OID; repeat for several")
+    add_snmp_target(snmp_get_p)
+
+    snmp_walk_p = snmp_actions.add_parser("walk", help="read a subtree")
+    snmp_walk_p.add_argument("--oid", required=True, action="append",
+                             help="numeric root OID of the subtree")
+    add_snmp_target(snmp_walk_p)
+
+    snmp_set_p = snmp_actions.add_parser("set", help="write one OID (needs --yes)")
+    snmp_set_p.add_argument("--oid", required=True, action="append",
+                            help="numeric OID to write")
+    snmp_set_p.add_argument("--type", required=True,
+                            help="net-snmp type code: i u s x a o t c")
+    snmp_set_p.add_argument("--value", required=True, help="value to write")
+    snmp_set_p.add_argument("--yes", action="store_true",
+                            help="confirm the write; without it nothing is sent")
+    add_snmp_target(snmp_set_p)
+
+    snmp_preset_p = snmp_actions.add_parser(
+        "preset", help="run a saved preset by name")
+    snmp_preset_p.add_argument("--preset", required=True, help="preset name")
+    snmp_preset_p.add_argument("--value", help="value, for presets that write one")
+    snmp_preset_p.add_argument("--yes", action="store_true",
+                               help="confirm, for presets that write")
+    add_snmp_target(snmp_preset_p)
+
+    snmp_presets_p = snmp_actions.add_parser(
+        "presets", help="list the available presets")
+    snmp_presets_p.add_argument("--platform", help="filter by platform")
+    snmp_presets_p.add_argument("--writes-only", action="store_true",
+                                help="show only presets that write")
+    add_snmp_target(snmp_presets_p, needs_target=False)
+
+    snmp.set_defaults(func=cmd_snmp)
+
     # --- inventory ---
     inventory = subparsers.add_parser(
         "inventory", help="list the device inventory")
@@ -378,6 +558,17 @@ def main(argv: list[str] | None = None) -> int:
     if (getattr(args, "out", None) and not getattr(args, "format", None)
             and args.command != "snapshot"):
         args.format = "json" if str(args.out).endswith(".json") else "csv"
+
+    # Every snmp sub-action reads the same attribute set; fill in the ones
+    # its own parser does not define so cmd_snmp never needs hasattr checks.
+    if getattr(args, "command", None) == "snmp":
+        for attribute, default in (("target", ""), ("port", None), ("ifindex", None),
+                                   ("value", None), ("yes", False), ("preset", ""),
+                                   ("oid", []), ("type", "s"), ("platform", ""),
+                                   ("writes_only", False), ("format", None),
+                                   ("out", None)):
+            if not hasattr(args, attribute):
+                setattr(args, attribute, default)
 
     try:
         return args.func(args)

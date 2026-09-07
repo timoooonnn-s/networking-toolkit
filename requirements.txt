@@ -30,7 +30,13 @@ ntc-templates>=5.0.0
 # ruff>=0.5          # linting: ruff check .
 
 # --- External binaries (not pip-installable) ---
-# fping   Optional. The multi-host reachability check uses it when present —
-#         one process for the whole subnet instead of one ping per host.
-#         Without it the tool falls back to the system ping automatically.
-#           Debian/Ubuntu: apt install fping      macOS: brew install fping
+# fping     Optional. The multi-host reachability check uses it when present —
+#           one process for the whole subnet instead of one ping per host.
+#           Without it the tool falls back to the system ping automatically.
+#             Debian/Ubuntu: apt install fping      macOS: brew install fping
+#
+# net-snmp  Optional, but REQUIRED for SNMPv3. The SNMP assistant shells out to
+#           snmpget/snmpwalk/snmpset when they are on PATH, which is what gives
+#           it v3 auth+priv. Without them it falls back to a built-in SNMPv2c
+#           engine (pure standard library) that covers GET/GETNEXT/SET/WALK.
+#             Debian/Ubuntu: apt install snmp       macOS: brew install net-snmp

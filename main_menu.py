@@ -29,10 +29,12 @@ main_menu.py
     ├── backup.py            — configuration backup + change detection
     ├── validator.py         — pre/post change validation
     ├── voss_parsers.py      — VOSS CLI output parsers (used by the validator)
+    ├── snmp_assistant.py    — SNMP reads/writes with a saved-preset library
+    ├── snmp_presets.py      — the preset library itself
     ├── napalm_interface.py  — NAPALM normalized getters
     ├── rollback.py          — multi-vendor config rollback generator
     ├── interface_health.py  — interface health dashboard
-    └── ip_hardware.py       — SNMP, VLAN tracker, next-IP, bandwidth
+    └── ip_hardware.py       — VLAN tracker, next-IP, bandwidth
 """
 
 import sys
@@ -69,12 +71,12 @@ from features.interface_health import run_interactive as tool_health_dashboard
 from features.ip_hardware import (
     tool_bandwidth_mon,
     tool_next_ip,
-    tool_snmp_discovery,
     tool_vlan_tracker,
 )
 from features.multiping import run_interactive as tool_multiping
 from features.napalm_interface import run_interactive as tool_napalm
 from features.rollback import run_interactive as tool_rollback
+from features.snmp_assistant import run_interactive as tool_snmp
 from features.ssh_runner import run_interactive as tool_ssh_bulk
 from features.system_health import (
     tool_log_scanner,
@@ -127,7 +129,7 @@ TOOLS: dict[str, tuple[str, object]] = {
     "23": ("Next Available IP",                tool_next_ip),
     "24": ("Bandwidth Monitor",                tool_bandwidth_mon),
     "25": ("VLAN Planner / Tracker",           tool_vlan_tracker),
-    "26": ("SNMP Device Discovery",            tool_snmp_discovery),
+    "26": ("SNMP Assistant",                   tool_snmp),
 }
 
 SECTIONS: list[tuple[str, list[str]]] = [

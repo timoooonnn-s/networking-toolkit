@@ -31,8 +31,9 @@ BACKUP_DIR   = DATA_DIR / "backups"
 EXPORT_DIR   = DATA_DIR / "exports"
 SNAPSHOT_DIR = DATA_DIR / "snapshots"
 
-SNIPPET_FILE   = DATA_DIR / "sysnet_snippets.json"
-VLAN_DB_FILE   = DATA_DIR / "sysnet_vlans.json"
+SNIPPET_FILE      = DATA_DIR / "sysnet_snippets.json"
+VLAN_DB_FILE      = DATA_DIR / "sysnet_vlans.json"
+SNMP_PRESETS_FILE = DATA_DIR / "snmp_presets.json"
 INVENTORY_FILE = Path(
     os.environ.get("SYSNET_INVENTORY", DATA_DIR / "inventory.json")
 ).expanduser()

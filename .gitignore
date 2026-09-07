@@ -214,3 +214,4 @@ snapshots/
 inventory.json
 sysnet_snippets.json
 sysnet_vlans.json
+snmp_presets.json

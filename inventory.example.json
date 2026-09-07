@@ -2,40 +2,72 @@
   "_comment": [
     "Copy to inventory.json (git-ignored) and edit. Override the location",
     "with $SYSNET_INVENTORY. Keys: host (required), device_type, port, tags,",
-    "and secret_env — the NAME of an environment variable holding the enable",
+    "and secret_env \u2014 the NAME of an environment variable holding the enable",
     "secret, so the file itself never contains one.",
+    "SNMP: snmp_version, snmp_port, and snmp_community_env /",
+    "snmp_write_community_env (again, env var NAMES, not the strings). For",
+    "v3 use snmp_v3_user, snmp_v3_auth_protocol, snmp_v3_priv_protocol and",
+    "snmp_v3_auth_key_env / snmp_v3_priv_key_env.",
     "Tools address devices by name, by host, by tag:<tag>, or with 'all'."
   ],
-
   "core-vsp-01": {
     "host": "10.0.0.1",
     "device_type": "extreme_vsp",
     "port": 22,
-    "tags": ["core", "site-a", "fabric"]
+    "tags": [
+      "core",
+      "site-a",
+      "fabric"
+    ],
+    "snmp_version": "2c",
+    "snmp_community_env": "VOSS_SNMP_RO",
+    "snmp_write_community_env": "VOSS_SNMP_RW"
   },
   "core-vsp-02": {
     "host": "10.0.0.2",
     "device_type": "extreme_vsp",
     "port": 22,
-    "tags": ["core", "site-a", "fabric"]
+    "tags": [
+      "core",
+      "site-a",
+      "fabric"
+    ],
+    "snmp_version": "3",
+    "snmp_v3_user": "netops",
+    "snmp_v3_auth_protocol": "SHA",
+    "snmp_v3_priv_protocol": "AES",
+    "snmp_v3_auth_key_env": "VOSS_SNMP_AUTH",
+    "snmp_v3_priv_key_env": "VOSS_SNMP_PRIV"
   },
   "old-access-07": {
     "host": "10.1.1.7",
     "device_type": "extreme_ers",
     "port": 22,
-    "tags": ["access", "site-a", "legacy"]
+    "tags": [
+      "access",
+      "site-a",
+      "legacy"
+    ],
+    "snmp_version": "2c",
+    "snmp_community_env": "ERS_SNMP_RO"
   },
   "edge-router-01": {
     "host": "192.168.1.1",
     "device_type": "cisco_ios",
     "port": 22,
     "secret_env": "CISCO_ENABLE",
-    "tags": ["edge", "site-a"]
+    "tags": [
+      "edge",
+      "site-a"
+    ]
   },
   "edge-junos-01": {
     "host": "192.168.1.10",
     "device_type": "juniper_junos",
     "port": 22,
-    "tags": ["edge", "site-b"]
+    "tags": [
+      "edge",
+      "site-b"
+    ]
   }
 }

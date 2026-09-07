@@ -5,7 +5,6 @@ IP Address & Hardware Tools
 
 Tools
 -----
-    tool_snmp_discovery() — Manual SNMPv2c sysDescr getter (no pysnmp needed)
     tool_vlan_tracker()   — JSON-backed VLAN planner/tracker
     tool_next_ip()        — Next free IP in a subnet
     tool_bandwidth_mon()  — Real-time RX/TX bandwidth from /proc/net/dev
@@ -13,9 +12,13 @@ Tools
 Reachability sweeps live in features/multiping.py, which uses fping when it
 is available and the system ping otherwise.
 
-The MAC vendor lookup that used to live here was removed: it depended on
-macvendors.co, which now requires an API key, so the tool could only ever
-print an error.
+Two tools were removed from this module rather than repaired:
+
+* The MAC vendor lookup depended on macvendors.co, which now requires an API
+  key, so it could only ever print an error.
+* The SNMP device discovery tool decoded replies by scanning for printable
+  byte runs, which misparsed readily.  features/snmp_assistant.py replaces it
+  with a real BER decoder, and its 'sysdescr' preset does the same job.
 """
 
 from __future__ import annotations
@@ -24,96 +27,12 @@ import ipaddress
 import json
 import os
 import platform
-import random
-import socket
-import struct
 import sys
 import time
 
 from core.colors import C_BOLD, C_CYAN, C_GREEN, C_RED, C_RESET, C_YELLOW
 from core.export import offer_export
 from core.paths import VLAN_DB_FILE
-
-# ---------------------------------------------------------------------------
-# SNMP Device Discovery (SNMPv2c, stdlib only)
-# ---------------------------------------------------------------------------
-
-def tool_snmp_discovery() -> None:
-    """Query a device for sysDescr via a hand-crafted SNMPv2c GET packet."""
-    print(f"{C_BOLD}--- SNMP Device Discovery (sysDescr) ---{C_RESET}")
-    target_ip = input("Target IP: ").strip()
-    community = input("Community string (default: public): ").strip() or "public"
-    port      = 161
-
-    def _encode_len(length: int) -> bytes:
-        if length < 128:
-            return bytes([length])
-        parts: list[int] = []
-        while length > 0:
-            parts.insert(0, length & 0xFF)
-            length >>= 8
-        return bytes([0x80 | len(parts)] + parts)
-
-    def _build_packet(comm: str, oid: str = "1.3.6.1.2.1.1.1.0") -> bytes:
-        # Encode OID
-        parts     = [int(x) for x in oid.split(".")]
-        oid_bytes = bytearray([parts[0] * 40 + parts[1]])
-        for val in parts[2:]:
-            if val < 128:
-                oid_bytes.append(val)
-            else:
-                sub: list[int] = [val & 0x7F]
-                val >>= 7
-                while val:
-                    sub.insert(0, (val & 0x7F) | 0x80)
-                    val >>= 7
-                oid_bytes.extend(sub)
-
-        varbind_val  = b"\x06" + _encode_len(len(oid_bytes)) + bytes(oid_bytes) + b"\x05\x00"
-        varbind      = b"\x30" + _encode_len(len(varbind_val)) + varbind_val
-        varbind_list = b"\x30" + _encode_len(len(varbind)) + varbind
-
-        req_id      = random.randint(1000, 9999)
-        pdu_content = (
-            b"\x02\x04" + struct.pack(">I", req_id)
-            + b"\x02\x01\x00\x02\x01\x00"
-            + varbind_list
-        )
-        pdu = b"\xa0" + _encode_len(len(pdu_content)) + pdu_content
-
-        comm_enc = comm.encode()
-        msg_body = (
-            b"\x02\x01\x01"
-            + b"\x04" + bytes([len(comm_enc)]) + comm_enc
-            + pdu
-        )
-        return b"\x30" + _encode_len(len(msg_body)) + msg_body
-
-    print(f"Sending SNMPv2c GET to {target_ip}:{port} …")
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.settimeout(2.0)
-    try:
-        sock.sendto(_build_packet(community), (target_ip, port))
-        data, _ = sock.recvfrom(2048)
-
-        # Crude printable-string extraction
-        clean = "".join(chr(b) if 32 <= b <= 126 else "\n" for b in data)
-        found = False
-        for segment in clean.split("\n"):
-            if len(segment) > 5 and segment != community and " " in segment:
-                print(f"\n{C_GREEN}Device Info:{C_RESET}\n{C_CYAN}{segment}{C_RESET}")
-                found = True
-                break
-        if not found:
-            print(f"{C_YELLOW}Response received but could not decode sysDescr string.{C_RESET}")
-
-    except TimeoutError:
-        print(f"{C_RED}Timeout — no response from {target_ip}. (Check IP, community, firewall){C_RESET}")
-    except Exception as exc:
-        print(f"{C_RED}Error: {exc}{C_RESET}")
-    finally:
-        sock.close()
-
 
 # ---------------------------------------------------------------------------
 # VLAN Planner & Tracker

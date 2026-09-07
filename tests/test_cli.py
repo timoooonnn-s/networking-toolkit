@@ -172,3 +172,123 @@ def test_run_exits_2_when_the_ssh_layer_contacts_nothing(monkeypatch):
     monkeypatch.setattr("features.ssh_runner.run_bulk_ssh", lambda *a, **k: [])
     assert cli.main(["run", "--targets", "all", "--command", "show version"]) == \
         cli.EXIT_ERROR
+
+
+# ---------------------------------------------------------------------------
+# snmp
+# ---------------------------------------------------------------------------
+
+def _point_at(monkeypatch, agent):
+    """Make every credential the SNMP CLI builds target the fake agent."""
+    import features.snmp_assistant as assistant
+
+    original = assistant.credentials_for
+
+    def patched(entry=None, write=False, prompt=True):
+        creds = original(entry, write, prompt=False)
+        creds.port = agent.port
+        creds.timeout_s = 2
+        return creds
+
+    monkeypatch.setattr(assistant, "credentials_for", patched)
+
+
+def test_snmp_presets_lists_without_touching_a_device(capsys):
+    assert cli.main(["snmp", "presets"]) == cli.EXIT_OK
+    out = capsys.readouterr().out
+    assert "port-up" in out and "sysname" in out
+
+
+def test_snmp_presets_can_show_only_writes(capsys):
+    assert cli.main(["snmp", "presets", "--writes-only"]) == cli.EXIT_OK
+    out = capsys.readouterr().out
+    assert "port-up" in out
+    assert "sysdescr" not in out
+
+
+def test_snmp_preset_get(monkeypatch, capsys):
+    from tests.fake_agent import FakeAgent, octet_string
+
+    monkeypatch.setenv("SNMP_COMMUNITY", "public")
+    with FakeAgent({"1.3.6.1.2.1.1.5.0": octet_string("core-vsp-01")}) as agent:
+        _point_at(monkeypatch, agent)
+        code = cli.main(["snmp", "preset", "--target", "127.0.0.1",
+                         "--preset", "sysname"])
+    assert code == cli.EXIT_OK
+    assert "core-vsp-01" in capsys.readouterr().out
+
+
+def test_snmp_write_is_refused_without_yes(monkeypatch, capsys):
+    from tests.fake_agent import FakeAgent, integer
+
+    monkeypatch.setenv("SNMP_COMMUNITY", "public")
+    monkeypatch.setenv("SNMP_WRITE_COMMUNITY", "private")
+    table = {"1.3.6.1.2.1.2.2.1.7.192": integer(2)}
+    with FakeAgent(table) as agent:
+        _point_at(monkeypatch, agent)
+        code = cli.main(["snmp", "preset", "--target", "127.0.0.1",
+                         "--preset", "port-up", "--ifindex", "192"])
+        # Nothing was sent: the port is still admin-down.
+        assert agent.table["1.3.6.1.2.1.2.2.1.7.192"][1] == b"\x02"
+
+    assert code == cli.EXIT_ERROR
+    assert "--yes" in capsys.readouterr().out
+
+
+def test_snmp_write_applies_with_yes(monkeypatch):
+    from tests.fake_agent import FakeAgent, integer
+
+    monkeypatch.setenv("SNMP_COMMUNITY", "public")
+    monkeypatch.setenv("SNMP_WRITE_COMMUNITY", "private")
+    with FakeAgent({"1.3.6.1.2.1.2.2.1.7.192": integer(2)}) as agent:
+        _point_at(monkeypatch, agent)
+        code = cli.main(["snmp", "preset", "--target", "127.0.0.1",
+                         "--preset", "port-up", "--ifindex", "192", "--yes"])
+        assert agent.table["1.3.6.1.2.1.2.2.1.7.192"][1] == b"\x01"
+    assert code == cli.EXIT_OK
+
+
+def test_snmp_resolves_a_port_name_to_an_ifindex(monkeypatch, capsys):
+    from tests.fake_agent import FakeAgent, integer, octet_string
+
+    monkeypatch.setenv("SNMP_COMMUNITY", "public")
+    monkeypatch.setenv("SNMP_WRITE_COMMUNITY", "private")
+    table = {
+        "1.3.6.1.2.1.31.1.1.1.1.192": octet_string("Port1/1"),
+        "1.3.6.1.2.1.31.1.1.1.1.193": octet_string("Port1/2"),
+        "1.3.6.1.2.1.2.2.1.7.192":    integer(2),
+    }
+    with FakeAgent(table) as agent:
+        _point_at(monkeypatch, agent)
+        code = cli.main(["snmp", "preset", "--target", "127.0.0.1",
+                         "--preset", "port-up", "--port", "1/1", "--yes"])
+        assert agent.table["1.3.6.1.2.1.2.2.1.7.192"][1] == b"\x01"
+
+    assert code == cli.EXIT_OK
+    assert "1/1 → ifIndex 192" in capsys.readouterr().out
+
+
+def test_snmp_set_needs_yes_too(monkeypatch, capsys):
+    from tests.fake_agent import FakeAgent, octet_string
+
+    monkeypatch.setenv("SNMP_WRITE_COMMUNITY", "private")
+    with FakeAgent({"1.3.6.1.2.1.1.5.0": octet_string("old")}) as agent:
+        _point_at(monkeypatch, agent)
+        code = cli.main(["snmp", "set", "--target", "127.0.0.1",
+                         "--oid", "1.3.6.1.2.1.1.5.0", "--type", "s",
+                         "--value", "new"])
+        assert agent.table["1.3.6.1.2.1.1.5.0"][1] == b"old"
+    assert code == cli.EXIT_ERROR
+
+
+def test_an_unknown_preset_is_reported(monkeypatch, capsys):
+    monkeypatch.setenv("SNMP_COMMUNITY", "public")
+    assert cli.main(["snmp", "preset", "--target", "10.0.0.1",
+                     "--preset", "no-such-preset"]) == cli.EXIT_ERROR
+
+
+def test_snmp_without_a_community_fails_instead_of_hanging(monkeypatch):
+    monkeypatch.delenv("SNMP_COMMUNITY", raising=False)
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: False)
+    assert cli.main(["snmp", "get", "--target", "10.0.0.1",
+                     "--oid", "1.3.6.1.2.1.1.5.0"]) == cli.EXIT_ERROR

@@ -217,6 +217,7 @@ def load_inventory(path=None) -> dict[str, dict[str, Any]]:
 def resolve_targets(
     selector: str,
     inventory: dict[str, dict[str, Any]] | None = None,
+    quiet: bool = False,
 ) -> list[tuple[str, dict[str, Any]]]:
     """
     Turn an operator-supplied *selector* into a list of (name, profile) pairs.
@@ -228,7 +229,9 @@ def resolve_targets(
         192.168.1.1         an inventory entry's host value
 
     Unknown entries are reported and skipped, so a typo costs one device
-    rather than the whole run.
+    rather than the whole run.  Pass quiet=True when the caller accepts a
+    bare host that is legitimately absent from the inventory — the SNMP tool
+    takes any IP, so warning about it there would be noise, not help.
     """
     inv = inventory if inventory is not None else load_inventory()
     selected: dict[str, dict[str, Any]] = {}
@@ -247,7 +250,7 @@ def resolve_targets(
                 name: profile for name, profile in inv.items()
                 if tag in [str(t).lower() for t in profile.get("tags", [])]
             }
-            if not matches:
+            if not matches and not quiet:
                 print(f"{C_YELLOW}No inventory device carries tag '{tag}'.{C_RESET}")
             selected.update(matches)
             continue
@@ -262,7 +265,7 @@ def resolve_targets(
         }
         if by_host:
             selected.update(by_host)
-        else:
+        elif not quiet:
             print(f"{C_YELLOW}'{token}' is not in the inventory — skipped.{C_RESET}")
 
     return sorted(selected.items())
