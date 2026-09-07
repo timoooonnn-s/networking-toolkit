@@ -24,7 +24,7 @@ import os
 import re
 import sys
 
-VERSION = "2.3.0"
+VERSION = "2.4.0"
 
 # ---------------------------------------------------------------------------
 # ANSI escape codes — emptied when the terminal cannot render them
