@@ -214,3 +214,75 @@ def test_pad_does_not_truncate_oversized_content():
 
 def test_strip_ansi():
     assert strip_ansi(f"{C_GREEN}core-01{C_RESET}") == "core-01"
+
+
+# ---------------------------------------------------------------------------
+# The session must never be left open when setup fails
+# ---------------------------------------------------------------------------
+
+class _FakeConn:
+    """Minimal stand-in for a Netmiko connection."""
+
+    def __init__(self):
+        self.disconnected = False
+
+    def disconnect(self):
+        self.disconnected = True
+
+
+def test_a_setup_failure_after_connect_closes_the_session(monkeypatch):
+    # __init__ raising means the caller never gets an object to .close(), so
+    # anything escaping the setup steps leaks the SSH session for the life of
+    # the process.  Ctrl-C during 'enable' is the realistic way in: it is a
+    # BaseException, so the broad handlers inside the setup steps miss it.
+    from core.connection import SshRunner
+
+    fake = _FakeConn()
+
+    def fake_connect(self):
+        self._conn = fake
+
+    def boom(self):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(SshRunner, "_connect", fake_connect)
+    monkeypatch.setattr(SshRunner, "_ensure_privileged", boom)
+
+    with pytest.raises(KeyboardInterrupt):
+        SshRunner({"host": "10.0.0.1", "device_type": "extreme_vsp"},
+                  legacy_algorithms=False)
+
+    assert fake.disconnected, "the SSH session was leaked"
+
+
+def test_a_clean_setup_leaves_the_session_open(monkeypatch):
+    from core.connection import SshRunner
+
+    fake = _FakeConn()
+    monkeypatch.setattr(SshRunner, "_connect",
+                        lambda self: setattr(self, "_conn", fake))
+    monkeypatch.setattr(SshRunner, "_ensure_privileged", lambda self: None)
+    monkeypatch.setattr(SshRunner, "_ensure_paging_disabled", lambda self: None)
+
+    runner = SshRunner({"host": "10.0.0.1", "device_type": "extreme_vsp"},
+                       legacy_algorithms=False)
+    assert not fake.disconnected
+    runner.close()
+    assert fake.disconnected
+
+
+# ---------------------------------------------------------------------------
+# wait_for_user
+# ---------------------------------------------------------------------------
+
+def test_wait_for_user_survives_an_exhausted_stdin(monkeypatch, capsys):
+    # Both menu call sites sit outside their try blocks, so an EOF here used
+    # to end the menu on a stack trace instead of a clean exit.
+    from core.colors import wait_for_user
+
+    def no_input(*_):
+        raise EOFError
+
+    monkeypatch.setattr("builtins.input", no_input)
+    wait_for_user()                      # must not raise
+    capsys.readouterr()

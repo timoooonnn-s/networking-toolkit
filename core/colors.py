@@ -106,5 +106,16 @@ def print_header() -> None:
 
 
 def wait_for_user() -> None:
-    """Pause execution until the operator presses Enter."""
-    input(f"\n{C_YELLOW}Press Enter to return to main menu...{C_RESET}")
+    """
+    Pause execution until the operator presses Enter.
+
+    EOF is swallowed deliberately.  This is a UI pause, and an exhausted
+    stdin (piped input, a here-doc, a closed terminal) means "there is nobody
+    to wait for" — never an error worth a traceback.  Both menu call sites sit
+    outside their try blocks, so without this the menu ends on a stack trace
+    instead of exiting cleanly.
+    """
+    try:
+        input(f"\n{C_YELLOW}Press Enter to return to main menu...{C_RESET}")
+    except EOFError:
+        print()

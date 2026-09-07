@@ -7,7 +7,7 @@ device-type mappings are never duplicated.
 
 Usage
 -----
-    from core.inventory import get_device_profile, load_inventory, resolve_targets
+    from core.inventory import build_ad_hoc_profile, load_inventory, resolve_targets
 
 Data flow
 ---------
@@ -313,41 +313,6 @@ def get_credentials(
 def clear_credential_cache() -> None:
     """Forget every cached credential (used after an auth failure)."""
     _CREDENTIAL_CACHE.clear()
-
-
-def get_device_profile(
-    hostname_or_ip: str,
-    inventory: dict[str, dict[str, Any]] | None = None,
-) -> dict[str, Any]:
-    """
-    Look up a device in the inventory by name or by 'host' value and return a
-    Netmiko-compatible dict with 'username' and 'password' injected.
-
-    Raises KeyError if the device is not found.
-    """
-    inv = inventory if inventory is not None else load_inventory()
-    username, password = get_credentials()
-
-    profile = inv.get(hostname_or_ip)
-    if profile is None:
-        profile = next(
-            (p for p in inv.values() if p.get("host") == hostname_or_ip),
-            None,
-        )
-    if profile is None:
-        raise KeyError(
-            f"Device '{hostname_or_ip}' not found in inventory. "
-            f"Add it to inventory.json or pass credentials manually."
-        )
-
-    return build_ad_hoc_profile(
-        host=profile["host"],
-        device_type=profile.get("device_type", "cisco_ios"),
-        username=username,
-        password=password,
-        port=int(profile.get("port", 22)),
-        secret=profile.get("secret", ""),
-    )
 
 
 def build_ad_hoc_profile(

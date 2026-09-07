@@ -148,3 +148,27 @@ def test_credentials_come_from_the_environment(monkeypatch):
     clear_credential_cache()
     assert cli._resolve_credentials(None) == ("netops", "s3cret")
     clear_credential_cache()
+
+
+# ---------------------------------------------------------------------------
+# "nothing ran" must never look like success
+# ---------------------------------------------------------------------------
+
+def test_run_exits_2_when_no_device_had_a_usable_profile(monkeypatch):
+    # Reporting "0/0 device(s) reachable" with exit 0 is how a broken cron job
+    # stays green forever: nothing was contacted, so this is "could not run".
+    monkeypatch.setenv("SYSNET_USER", "u")
+    monkeypatch.setenv("SYSNET_PASS", "p")
+    monkeypatch.setattr("core.inventory.build_ad_hoc_profile",
+                        lambda **_: (_ for _ in ()).throw(ValueError("nope")))
+    assert cli.main(["run", "--targets", "all", "--command", "show version"]) == \
+        cli.EXIT_ERROR
+
+
+def test_run_exits_2_when_the_ssh_layer_contacts_nothing(monkeypatch):
+    # run_bulk_ssh returns [] when Netmiko is missing entirely.
+    monkeypatch.setenv("SYSNET_USER", "u")
+    monkeypatch.setenv("SYSNET_PASS", "p")
+    monkeypatch.setattr("features.ssh_runner.run_bulk_ssh", lambda *a, **k: [])
+    assert cli.main(["run", "--targets", "all", "--command", "show version"]) == \
+        cli.EXIT_ERROR

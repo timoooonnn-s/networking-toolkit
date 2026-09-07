@@ -50,22 +50,6 @@ from core.dependency_check import check_dependency
 from core.export import offer_export
 from core.prompts import pick_targets
 
-# ---------------------------------------------------------------------------
-# Optional preamble commands per device type
-# ---------------------------------------------------------------------------
-# Paging is disabled by core.connection during session setup, so nothing here
-# needs to repeat it.  What remains is genuinely per-platform preamble, and
-# each entry is a LIST of commands — the EXOS entry used to be the single
-# string "enable, term more dis", which is not a command any device accepts.
-DEFAULT_COMMANDS: dict[str, list[str]] = {
-    "cisco_ios":     [],
-    "cisco_xe":      [],
-    "juniper_junos": [],
-    "extreme_exos":  [],
-    "extreme_vsp":   [],
-    "extreme_ers":   [],
-}
-
 DEFAULT_DEVICE_TYPE = "extreme_vsp"
 
 
@@ -245,14 +229,12 @@ def run_interactive() -> None:
         print(f"{C_RED}No commands entered.{C_RESET}")
         return
 
-    devices  = [profile for _name, profile in targets]
-    preamble = DEFAULT_COMMANDS.get(devices[0]["device_type"], [])
-    all_commands = preamble + commands
+    devices = [profile for _name, profile in targets]
 
     print(f"\n{C_CYAN}Launching {len(devices)} persistent session(s), "
-          f"{len(all_commands)} command(s) each ...{C_RESET}\n")
+          f"{len(commands)} command(s) each ...{C_RESET}\n")
 
-    results = run_bulk_ssh(devices, all_commands)
+    results = run_bulk_ssh(devices, commands)
     print_results(results)
 
     rows = [row for result in results for row in result.as_rows()]

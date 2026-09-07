@@ -152,7 +152,22 @@ def cmd_run(args: argparse.Namespace) -> int:
         except ValueError as exc:
             print(f"{C_YELLOW}Skipping {name}: {exc}{C_RESET}", file=sys.stderr)
 
+    if not devices:
+        print(f"{C_RED}None of the {len(entries)} matched device(s) had a "
+              f"usable connection profile.{C_RESET}", file=sys.stderr)
+        return EXIT_ERROR
+
     results = run_bulk_ssh(devices, args.command, max_workers=args.workers)
+
+    # run_bulk_ssh returns nothing at all when Netmiko is missing.  Reporting
+    # that as success is how a broken cron job stays green forever: no device
+    # was contacted, so this is "could not run", not "nothing to report".
+    if not results:
+        print(f"{C_RED}No device was contacted — see the message above "
+              f"(Netmiko missing, or every session failed to start).{C_RESET}",
+              file=sys.stderr)
+        return EXIT_ERROR
+
     print_results(results)
 
     if args.format:

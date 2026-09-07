@@ -1,4 +1,4 @@
-# Networking Toolkit ![Python](https://img.shields.io/badge/python-3.10%2B-blue) ![Version](https://img.shields.io/badge/version-2.3.0-green) ![Tests](https://img.shields.io/badge/tests-109%20offline-brightgreen)
+# Networking Toolkit ![Python](https://img.shields.io/badge/python-3.10%2B-blue) ![Version](https://img.shields.io/badge/version-2.3.0-green) ![Tests](https://img.shields.io/badge/tests-117%20offline-brightgreen)
 
 **Modular CLI utility for system & network engineers.**
 Two entry points over the same code: an interactive menu, and a non-interactive CLI for cron and CI.
@@ -241,7 +241,7 @@ launching the toolkit from another directory no longer opens a second, empty dat
 
 ```bash
 pip install pytest
-python3 -m pytest          # 109 tests, ~0.3s
+python3 -m pytest          # 117 tests, ~0.2s
 ruff check .               # optional: pip install ruff
 ```
 

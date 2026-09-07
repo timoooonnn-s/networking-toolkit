@@ -28,7 +28,3 @@ ignore = [
     "B008",    # function call in default argument
     "SIM105",  # contextlib.suppress over try/except/pass — less readable here
 ]
-
-[tool.ruff.lint.per-file-ignores]
-# Tests deliberately reach into private helpers to pin behaviour.
-"tests/*" = ["SLF001"]

@@ -238,14 +238,33 @@ def _ping_once(host: str, timeout_ms: int) -> PingResult:
     )
 
 
+def _ping_host(host: str, timeout_ms: int, retries: int) -> PingResult:
+    """
+    Probe one host, re-probing up to *retries* times while it looks down.
+
+    Same semantics as fping's -r: a host that answers on any attempt is up, so
+    the retry budget only costs time for hosts that are genuinely unreachable.
+    Without this the fallback engine ignored --retries entirely and reported a
+    single dropped packet as a down host.
+    """
+    result = _ping_once(host, timeout_ms)
+    for _ in range(max(0, retries)):
+        if result.alive:
+            break
+        result = _ping_once(host, timeout_ms)
+    return result
+
+
 def _ping_with_system(
     hosts: list[str],
     timeout_ms: int,
     workers: int,
+    retries: int = DEFAULT_RETRIES,
 ) -> list[PingResult]:
     """Fallback engine: one ping subprocess per host, across a thread pool."""
     with ThreadPoolExecutor(max_workers=min(workers, max(1, len(hosts)))) as pool:
-        return list(pool.map(lambda h: _ping_once(h, timeout_ms), hosts))
+        return list(pool.map(
+            lambda h: _ping_host(h, timeout_ms, retries), hosts))
 
 
 # ---------------------------------------------------------------------------
@@ -266,6 +285,9 @@ def ping_hosts(
     system ping across a thread pool.  If fping is present but produces
     nothing usable — an unexpected build, a permissions problem — the system
     ping runs instead rather than reporting a whole subnet as down.
+
+    *retries* applies to both engines: a host is only reported down after it
+    has failed every attempt.
     """
     if not hosts:
         return []
@@ -277,7 +299,7 @@ def ping_hosts(
         print(f"{C_YELLOW}fping produced no usable output — "
               f"falling back to the system ping.{C_RESET}")
 
-    return _ping_with_system(hosts, timeout_ms, workers)
+    return _ping_with_system(hosts, timeout_ms, workers, retries)
 
 
 def print_results(results: list[PingResult]) -> None:

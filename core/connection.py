@@ -326,8 +326,16 @@ class SshRunner:
             enable_legacy_ssh_algorithms()
 
         self._connect()
-        self._ensure_privileged()
-        self._ensure_paging_disabled()
+        # Once the socket is up, every remaining setup step has to hand the
+        # session back on failure.  __init__ raising means the caller never
+        # receives an object to close, so anything that escapes from here
+        # leaks the SSH session for the life of the process.
+        try:
+            self._ensure_privileged()
+            self._ensure_paging_disabled()
+        except BaseException:
+            self.close()
+            raise
 
     # ------------------------------------------------------------------
     # Phase 1 — connect

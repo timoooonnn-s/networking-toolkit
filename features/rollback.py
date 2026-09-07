@@ -150,15 +150,6 @@ class _CiscoRollback:
             f"! rollback running-config file flash:{archive_label}",
         ]
 
-    @staticmethod
-    def generate_archive_save(archive_label: str = "rollback_1") -> list[str]:
-        """Generate commands to save a pre-change archive snapshot."""
-        return [
-            "! --- Save pre-change archive ---",
-            "archive config",
-            f"! Alternatively: copy running-config flash:{archive_label}",
-        ]
-
 
 class _JuniperRollback:
     """

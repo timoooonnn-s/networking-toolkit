@@ -291,3 +291,51 @@ def test_a_real_edit_to_a_voss_running_config_is_detected(voss):
     edited = raw.replace("config terminal",
                          "config terminal\nvlan create 999 type port-mstprstp 0", 1)
     assert normalise_config(raw) != normalise_config(edited)
+
+
+# ---------------------------------------------------------------------------
+# multiping — retries apply to BOTH engines
+# ---------------------------------------------------------------------------
+
+def test_the_system_ping_fallback_honours_retries(monkeypatch):
+    # --retries used to reach only the fping path, so one dropped packet on
+    # the fallback engine reported a live host as down.
+    from features import multiping
+
+    attempts = {"n": 0}
+
+    def flaky(host, timeout_ms):
+        attempts["n"] += 1
+        return multiping.PingResult(host=host, alive=attempts["n"] >= 3)
+
+    monkeypatch.setattr(multiping, "_ping_once", flaky)
+    assert multiping._ping_host("10.0.0.1", 100, retries=3).alive
+    assert attempts["n"] == 3
+
+
+def test_retries_are_not_spent_on_a_host_that_answers(monkeypatch):
+    from features import multiping
+
+    attempts = {"n": 0}
+
+    def always_up(host, timeout_ms):
+        attempts["n"] += 1
+        return multiping.PingResult(host=host, alive=True)
+
+    monkeypatch.setattr(multiping, "_ping_once", always_up)
+    assert multiping._ping_host("10.0.0.1", 100, retries=5).alive
+    assert attempts["n"] == 1
+
+
+def test_a_host_that_never_answers_is_down_after_every_attempt(monkeypatch):
+    from features import multiping
+
+    attempts = {"n": 0}
+
+    def always_down(host, timeout_ms):
+        attempts["n"] += 1
+        return multiping.PingResult(host=host, alive=False)
+
+    monkeypatch.setattr(multiping, "_ping_once", always_down)
+    assert not multiping._ping_host("10.0.0.1", 100, retries=2).alive
+    assert attempts["n"] == 3       # the first probe plus two retries
